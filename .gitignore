@@ -1,0 +1,21 @@
+# Rust build output
+/target/
+
+# Rust profiling and coverage artifacts
+*.profraw
+*.profdata
+*.lcov
+
+# Editor and IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local environment files
+.env
+.env.*
