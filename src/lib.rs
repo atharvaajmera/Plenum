@@ -4,3 +4,4 @@
 //! for the Aether peer-to-peer file transfer engine.
 
 pub mod protocol;
+pub mod stream;
