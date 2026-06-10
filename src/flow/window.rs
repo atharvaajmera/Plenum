@@ -101,13 +101,8 @@ impl SenderWindow {
                 .ok_or(FlowError::UnknownSequence { sequence_no })?
                 .clone();
             send_packet(transport, &packet)?;
-            self.in_flight.insert(
-                sequence_no,
-                InFlightPacket {
-                    packet,
-                    sent_at: now,
-                },
-            );
+            self.in_flight
+                .insert(sequence_no, InFlightPacket { sent_at: now });
             sent += 1;
         }
 
@@ -175,13 +170,8 @@ impl SenderWindow {
                 .clone();
 
             send_packet(transport, &packet)?;
-            self.in_flight.insert(
-                sequence_no,
-                InFlightPacket {
-                    packet,
-                    sent_at: now,
-                },
-            );
+            self.in_flight
+                .insert(sequence_no, InFlightPacket { sent_at: now });
             sent += 1;
         }
 

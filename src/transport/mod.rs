@@ -2,9 +2,11 @@
 
 pub mod error;
 pub mod memory;
+pub mod tcp;
 
 pub use error::TransportError;
 pub use memory::{MemoryTransport, MemoryTransportConfig};
+pub use tcp::TcpTransport;
 
 pub type TransportResult<T> = Result<T, TransportError>;
 

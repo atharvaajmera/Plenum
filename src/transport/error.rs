@@ -6,6 +6,8 @@ use std::fmt;
 pub enum TransportError {
     Closed,
     BufferFull { capacity: usize, requested: usize },
+    FrameTooLarge { len: usize, max: usize },
+    Io { message: String },
 }
 
 impl fmt::Display for TransportError {
@@ -19,8 +21,20 @@ impl fmt::Display for TransportError {
                 f,
                 "transport buffer is full: capacity {capacity}, requested {requested}"
             ),
+            Self::FrameTooLarge { len, max } => {
+                write!(f, "transport frame is too large: {len} bytes, max {max}")
+            }
+            Self::Io { message } => write!(f, "transport I/O error: {message}"),
         }
     }
 }
 
 impl std::error::Error for TransportError {}
+
+impl From<std::io::Error> for TransportError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io {
+            message: error.to_string(),
+        }
+    }
+}
