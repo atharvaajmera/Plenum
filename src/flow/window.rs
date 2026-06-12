@@ -26,7 +26,6 @@ pub struct SenderWindow {
 
 impl SenderWindow {
     pub fn new(
-        packets: impl IntoIterator<Item = Packet>,
         window_size: usize,
         timeout_ticks: u64,
     ) -> Result<Self, FlowError> {
@@ -34,32 +33,35 @@ impl SenderWindow {
             return Err(FlowError::InvalidWindowSize);
         }
 
-        let mut packet_map = BTreeMap::new();
-
-        for packet in packets {
-            if packet.packet_type != PacketType::Data {
-                return Err(FlowError::UnexpectedPacketType {
-                    actual: packet.packet_type,
-                });
-            }
-
-            let sequence_no = packet.sequence_no;
-            if packet_map.insert(sequence_no, packet).is_some() {
-                return Err(FlowError::DuplicateSequence { sequence_no });
-            }
-        }
-
-        let pending = packet_map.keys().copied().collect();
-
         Ok(Self {
             window_size,
             timeout_ticks,
-            packets: packet_map,
-            pending,
+            packets: BTreeMap::new(),
+            pending: VecDeque::new(),
             in_flight: BTreeMap::new(),
             nacked: BTreeSet::new(),
             acked: BTreeSet::new(),
         })
+    }
+
+    pub fn enqueue(&mut self, packet: Packet) -> Result<(), FlowError> {
+        if packet.packet_type != PacketType::Data {
+            return Err(FlowError::UnexpectedPacketType {
+                actual: packet.packet_type,
+            });
+        }
+
+        let sequence_no = packet.sequence_no;
+        if self.packets.contains_key(&sequence_no)
+            || self.acked.contains(&sequence_no)
+            || self.in_flight.contains_key(&sequence_no)
+        {
+            return Err(FlowError::DuplicateSequence { sequence_no });
+        }
+
+        self.packets.insert(sequence_no, packet);
+        self.pending.push_back(sequence_no);
+        Ok(())
     }
 
     pub fn window_size(&self) -> usize {
@@ -74,8 +76,12 @@ impl SenderWindow {
         self.acked.len()
     }
 
-    pub fn is_complete(&self) -> bool {
-        self.acked.len() == self.packets.len()
+    pub fn pending_len(&self) -> usize {
+        self.pending.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.pending.is_empty() && self.in_flight.is_empty()
     }
 
     /// Sends unsent packets while there is window capacity.
@@ -116,6 +122,7 @@ impl SenderWindow {
                 self.in_flight.remove(&packet.sequence_no);
                 self.nacked.remove(&packet.sequence_no);
                 self.acked.insert(packet.sequence_no);
+                self.packets.remove(&packet.sequence_no);
                 Ok(())
             }
             PacketType::Nack => {

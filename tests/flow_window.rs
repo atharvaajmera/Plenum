@@ -6,7 +6,10 @@ use aether::transport::{MemoryTransport, MemoryTransportConfig, Transport};
 #[test]
 fn sender_respects_window_capacity_and_advances_on_ack() {
     let packets = chunk_bytes(b"abcdefghijklmnopqrstuvwxyz", 5).expect("chunking should succeed");
-    let mut sender = SenderWindow::new(packets, 2, 10).expect("sender window should build");
+    let mut sender = SenderWindow::new(2, 10).expect("sender window should build");
+    for packet in packets {
+        sender.enqueue(packet).expect("enqueue should succeed");
+    }
     let mut transport = MemoryTransport::default();
 
     let sent = sender
@@ -60,7 +63,10 @@ fn sender_respects_window_capacity_and_advances_on_ack() {
 #[test]
 fn sender_retransmits_after_timeout() {
     let packets = chunk_bytes(b"timeout", 32).expect("chunking should succeed");
-    let mut sender = SenderWindow::new(packets, 1, 3).expect("sender window should build");
+    let mut sender = SenderWindow::new(1, 3).expect("sender window should build");
+    for packet in packets {
+        sender.enqueue(packet).expect("enqueue should succeed");
+    }
     let mut transport = MemoryTransport::default();
 
     sender
@@ -97,7 +103,10 @@ fn sender_retransmits_after_timeout() {
 #[test]
 fn sender_retransmits_after_nack() {
     let packets = chunk_bytes(b"nack", 32).expect("chunking should succeed");
-    let mut sender = SenderWindow::new(packets, 1, 100).expect("sender window should build");
+    let mut sender = SenderWindow::new(1, 100).expect("sender window should build");
+    for packet in packets {
+        sender.enqueue(packet).expect("enqueue should succeed");
+    }
     let mut transport = MemoryTransport::default();
 
     sender
@@ -159,10 +168,12 @@ fn receiver_acks_buffers_and_nacks_missing_sequence() {
 #[test]
 fn rejects_invalid_flow_configuration_and_packets() {
     let packets = chunk_bytes(b"data", 2).expect("chunking should succeed");
-    let err = SenderWindow::new(packets, 0, 10).expect_err("zero window should fail");
+    let mut sender = SenderWindow::new(0, 10);
+    let err = sender.expect_err("zero window should fail");
     assert_eq!(err, FlowError::InvalidWindowSize);
 
-    let err = SenderWindow::new(vec![Packet::new(PacketType::Ack, 0, Vec::new())], 1, 10)
+    let mut sender = SenderWindow::new(1, 10).expect("sender window should build");
+    let err = sender.enqueue(Packet::new(PacketType::Ack, 0, Vec::new()))
         .expect_err("non-data sender packet should fail");
     assert_eq!(
         err,
@@ -187,7 +198,10 @@ fn rejects_invalid_flow_configuration_and_packets() {
 fn completes_transfer_over_simulated_latency_reordering_and_duplication() {
     let original = b"sliding window keeps multiple packets in flight while preserving order";
     let packets = chunk_bytes(original, 8).expect("chunking should succeed");
-    let mut sender = SenderWindow::new(packets, 3, 6).expect("sender window should build");
+    let mut sender = SenderWindow::new(3, 6).expect("sender window should build");
+    for packet in packets {
+        sender.enqueue(packet).expect("enqueue should succeed");
+    }
     let mut receiver = ReceiverWindow::new();
     let mut data_transport = MemoryTransport::new(MemoryTransportConfig {
         latency_ticks: 1,
@@ -237,7 +251,7 @@ fn completes_transfer_over_simulated_latency_reordering_and_duplication() {
                 .expect("control packet should be handled");
         }
 
-        if sender.is_complete() && restored == original {
+        if sender.is_empty() && restored == original {
             return;
         }
 
