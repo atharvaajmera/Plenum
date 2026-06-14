@@ -25,10 +25,7 @@ pub struct SenderWindow {
 }
 
 impl SenderWindow {
-    pub fn new(
-        window_size: usize,
-        timeout_ticks: u64,
-    ) -> Result<Self, FlowError> {
+    pub fn new(window_size: usize, timeout_ticks: u64) -> Result<Self, FlowError> {
         if window_size == 0 {
             return Err(FlowError::InvalidWindowSize);
         }

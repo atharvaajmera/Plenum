@@ -95,7 +95,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         Err(aether::discovery::DiscoveryError::NoPeersFound) => {
                             eprintln!("No peers found on the local network.");
-                            eprintln!("Make sure a receiver is running:  cargo run -- receive <port>");
+                            eprintln!(
+                                "Make sure a receiver is running:  cargo run -- receive <port>"
+                            );
                             std::process::exit(1);
                         }
                         Err(e) => return Err(e.into()),
@@ -214,8 +216,14 @@ fn run_receive(
     let broadcast_handle = if !no_discover {
         let beacon = Beacon::new();
         let handle = beacon.broadcast(&token, port)?;
-        println!("Broadcasting on local network with pairing token: {}", token.code());
-        println!("Sender can connect using:  cargo run -- send <file> --token {}", token.code());
+        println!(
+            "Broadcasting on local network with pairing token: {}",
+            token.code()
+        );
+        println!(
+            "Sender can connect using:  cargo run -- send <file> --token {}",
+            token.code()
+        );
         Some(handle)
     } else {
         None
@@ -339,10 +347,7 @@ fn run_receive(
     Ok(())
 }
 
-fn run_discover(
-    token: Option<String>,
-    timeout: u64,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn run_discover(token: Option<String>, timeout: u64) -> Result<(), Box<dyn std::error::Error>> {
     use aether::discovery::beacon::BeaconConfig;
 
     let config = BeaconConfig {

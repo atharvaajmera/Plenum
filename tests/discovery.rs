@@ -105,5 +105,7 @@ fn beacon_broadcast_and_discover_on_localhost() {
     assert_eq!(announcement.token, token_code);
     assert_eq!(announcement.tcp_port, tcp_port);
 
-    broadcaster.join().expect("broadcaster thread should finish");
+    broadcaster
+        .join()
+        .expect("broadcaster thread should finish");
 }

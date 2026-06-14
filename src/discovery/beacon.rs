@@ -220,7 +220,10 @@ impl Beacon {
     }
 
     /// Listens for a peer announcement matching a specific pairing token.
-    pub fn discover_with_token(&self, expected_token: &str) -> Result<Announcement, DiscoveryError> {
+    pub fn discover_with_token(
+        &self,
+        expected_token: &str,
+    ) -> Result<Announcement, DiscoveryError> {
         let socket = UdpSocket::bind(SocketAddrV4::new(
             Ipv4Addr::UNSPECIFIED,
             self.config.broadcast_port,

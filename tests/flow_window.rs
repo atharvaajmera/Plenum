@@ -173,7 +173,8 @@ fn rejects_invalid_flow_configuration_and_packets() {
     assert_eq!(err, FlowError::InvalidWindowSize);
 
     let mut sender = SenderWindow::new(1, 10).expect("sender window should build");
-    let err = sender.enqueue(Packet::new(PacketType::Ack, 0, Vec::new()))
+    let err = sender
+        .enqueue(Packet::new(PacketType::Ack, 0, Vec::new()))
         .expect_err("non-data sender packet should fail");
     assert_eq!(
         err,
