@@ -167,8 +167,7 @@ fn receiver_acks_buffers_and_nacks_missing_sequence() {
 
 #[test]
 fn rejects_invalid_flow_configuration_and_packets() {
-    let packets = chunk_bytes(b"data", 2).expect("chunking should succeed");
-    let mut sender = SenderWindow::new(0, 10);
+    let sender = SenderWindow::new(0, 10);
     let err = sender.expect_err("zero window should fail");
     assert_eq!(err, FlowError::InvalidWindowSize);
 

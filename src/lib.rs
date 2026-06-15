@@ -6,6 +6,7 @@
 pub mod discovery;
 pub mod flow;
 pub mod protocol;
+pub mod security;
 pub mod signaling;
 pub mod stream;
 pub mod transport;
