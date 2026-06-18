@@ -11,6 +11,8 @@ pub enum StreamError {
     DuplicateSequence { sequence_no: u32 },
     MissingSequence { sequence_no: u32 },
     UnexpectedPacketType { actual: PacketType },
+    Io { message: String },
+    Json(String),
 }
 
 impl fmt::Display for StreamError {
@@ -29,8 +31,24 @@ impl fmt::Display for StreamError {
             Self::UnexpectedPacketType { actual } => {
                 write!(f, "expected data packet, got {actual:?}")
             }
+            Self::Io { message } => write!(f, "stream I/O error: {message}"),
+            Self::Json(message) => write!(f, "stream json error: {message}"),
         }
     }
 }
 
 impl std::error::Error for StreamError {}
+
+impl From<std::io::Error> for StreamError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io {
+            message: error.to_string(),
+        }
+    }
+}
+
+impl From<serde_json::Error> for StreamError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Json(error.to_string())
+    }
+}

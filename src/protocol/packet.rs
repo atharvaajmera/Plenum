@@ -22,6 +22,7 @@ pub enum PacketType {
     Start,
     Finish,
     Close,
+    Resume,
 }
 
 impl PacketType {
@@ -33,6 +34,7 @@ impl PacketType {
             Self::Start => 0x04,
             Self::Finish => 0x05,
             Self::Close => 0x06,
+            Self::Resume => 0x07,
         }
     }
 
@@ -44,6 +46,7 @@ impl PacketType {
             0x04 => Ok(Self::Start),
             0x05 => Ok(Self::Finish),
             0x06 => Ok(Self::Close),
+            0x07 => Ok(Self::Resume),
             other => Err(ProtocolError::UnknownPacketType(other)),
         }
     }

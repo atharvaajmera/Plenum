@@ -61,6 +61,15 @@ impl SenderWindow {
         Ok(())
     }
 
+    pub fn enqueue_unacked(&mut self, packet: Packet) -> Result<bool, FlowError> {
+        if self.acked.contains(&packet.sequence_no) {
+            return Ok(false);
+        }
+
+        self.enqueue(packet)?;
+        Ok(true)
+    }
+
     pub fn window_size(&self) -> usize {
         self.window_size
     }
@@ -79,6 +88,13 @@ impl SenderWindow {
 
     pub fn is_empty(&self) -> bool {
         self.pending.is_empty() && self.in_flight.is_empty()
+    }
+
+    pub fn buffered_payload_bytes(&self) -> usize {
+        self.packets
+            .values()
+            .map(|packet| packet.payload.len())
+            .sum()
     }
 
     /// Sends unsent packets while there is window capacity.
@@ -197,6 +213,13 @@ impl ReceiverWindow {
         Self::default()
     }
 
+    pub fn with_next_expected(next_expected: u32) -> Self {
+        Self {
+            next_expected,
+            ..Self::default()
+        }
+    }
+
     pub fn next_expected(&self) -> u32 {
         self.next_expected
     }
@@ -215,6 +238,10 @@ impl ReceiverWindow {
         let sequence_no = packet.sequence_no;
         let mut controls = vec![Packet::new(PacketType::Ack, sequence_no, Vec::new())];
 
+        if sequence_no < self.next_expected {
+            return Ok(controls);
+        }
+
         if !self.delivered.contains(&sequence_no) && !self.buffered.contains_key(&sequence_no) {
             self.buffered.insert(sequence_no, packet.payload);
         }
@@ -230,17 +257,30 @@ impl ReceiverWindow {
         Ok(controls)
     }
 
-    /// Drains contiguous ordered payloads starting at the next expected sequence.
-    pub fn drain_ordered(&mut self) -> Vec<Vec<u8>> {
-        let mut payloads = Vec::new();
+    pub fn buffered_payload_bytes(&self) -> usize {
+        self.buffered.values().map(Vec::len).sum()
+    }
+
+    /// Drains contiguous ordered packets starting at the next expected sequence.
+    pub fn drain_ordered_packets(&mut self) -> Vec<(u32, Vec<u8>)> {
+        let mut packets = Vec::new();
 
         while let Some(payload) = self.buffered.remove(&self.next_expected) {
-            self.delivered.insert(self.next_expected);
+            let sequence_no = self.next_expected;
+            self.delivered.insert(sequence_no);
             self.next_expected = self.next_expected.saturating_add(1);
-            payloads.push(payload);
+            packets.push((sequence_no, payload));
         }
 
-        payloads
+        packets
+    }
+
+    /// Drains contiguous ordered payloads starting at the next expected sequence.
+    pub fn drain_ordered(&mut self) -> Vec<Vec<u8>> {
+        self.drain_ordered_packets()
+            .into_iter()
+            .map(|(_, payload)| payload)
+            .collect()
     }
 }
 

@@ -1,8 +1,9 @@
-use std::fs::File;
-use std::io::{Read, Write};
+use std::collections::BTreeMap;
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
@@ -10,11 +11,13 @@ use indicatif::{ProgressBar, ProgressStyle};
 use aether::discovery::{Beacon, PairingToken};
 use aether::flow::{ReceiverWindow, SenderWindow};
 use aether::protocol::{Packet, PacketType, encode_packet, parse_packet};
-use aether::transport::{TcpTransport, Transport};
+use aether::stream::{ResumeCheckpoint, chunk_bytes};
+use aether::transport::{MemoryTransport, MemoryTransportConfig, TcpTransport, Transport};
 
 const CHUNK_SIZE: usize = 32 * 1024;
 const WINDOW_SIZE: usize = 128;
 const TIMEOUT_TICKS: u64 = 1000;
+const RESUME_NEGOTIATION_TIMEOUT: Duration = Duration::from_millis(250);
 
 #[derive(Parser)]
 #[command(author, version, about = "Aether peer-to-peer file transfer engine", long_about = None)]
@@ -54,6 +57,18 @@ enum Commands {
         /// How long to listen for announcements (in seconds)
         #[arg(short = 's', long, default_value_t = 10)]
         timeout: u64,
+    },
+    /// Benchmark the transfer engine without disk or network setup
+    Benchmark {
+        /// Payload size in MiB
+        #[arg(long, default_value_t = 64)]
+        size_mb: usize,
+        /// Number of benchmark iterations
+        #[arg(long, default_value_t = 3)]
+        iterations: usize,
+        /// Simulated one-way latency in transport ticks
+        #[arg(long, default_value_t = 1)]
+        latency_ticks: u64,
     },
 }
 
@@ -112,6 +127,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             no_discover,
         } => run_receive(port, output_dir, no_discover),
         Commands::Discover { token, timeout } => run_discover(token, timeout),
+        Commands::Benchmark {
+            size_mb,
+            iterations,
+            latency_ticks,
+        } => run_benchmark(size_mb, iterations, latency_ticks),
     }
 }
 
@@ -128,14 +148,23 @@ fn run_send(file_path: PathBuf, address: String) -> Result<(), Box<dyn std::erro
     let mut transport = TcpTransport::connect(address)?;
     println!("Connected. Sending '{}' ({} bytes)", file_name, file_size);
 
-    // Send Start packet: 8 bytes size + filename string
     let mut start_payload = Vec::new();
     start_payload.extend_from_slice(&file_size.to_be_bytes());
     start_payload.extend_from_slice(file_name.as_bytes());
     let start_packet = Packet::new(PacketType::Start, 0, start_payload);
     transport.send(&encode_packet(&start_packet)?)?;
 
+    let (mut sequence_no, resume_bytes) = negotiate_resume(&mut transport)?;
+    if resume_bytes > 0 {
+        println!(
+            "Receiver requested resume from sequence {} ({} bytes already present)",
+            sequence_no, resume_bytes
+        );
+        file.seek(SeekFrom::Start(resume_bytes))?;
+    }
+
     let mut sender = SenderWindow::new(WINDOW_SIZE, TIMEOUT_TICKS)?;
+    let mut ack_sizes = BTreeMap::<u32, usize>::new();
 
     let pb = ProgressBar::new(file_size);
     pb.set_style(
@@ -145,16 +174,15 @@ fn run_send(file_path: PathBuf, address: String) -> Result<(), Box<dyn std::erro
         .unwrap()
         .progress_chars("#>-"),
     );
+    pb.set_position(resume_bytes.min(file_size));
 
-    let mut sequence_no = 0u32;
-    let mut file_done = false;
+    let mut file_done = resume_bytes >= file_size;
     let mut buffer = vec![0u8; CHUNK_SIZE];
-    let mut bytes_acked = 0u64;
+    let mut bytes_acked = resume_bytes;
 
     loop {
         let now = now_ms();
 
-        // Feed packets into the sender window until pending queue is large enough, or EOF
         while !file_done && sender.pending_len() < WINDOW_SIZE * 2 {
             let n = file.read(&mut buffer)?;
             if n == 0 {
@@ -163,41 +191,36 @@ fn run_send(file_path: PathBuf, address: String) -> Result<(), Box<dyn std::erro
             }
             let packet = Packet::new(PacketType::Data, sequence_no, buffer[..n].to_vec());
             sender.enqueue(packet)?;
-            sequence_no += 1;
+            ack_sizes.insert(sequence_no, n);
+            sequence_no = sequence_no.saturating_add(1);
         }
 
-        // Process incoming ACKs/NACKs
         while let Some(frame) = transport.recv()? {
             let control = parse_packet(&frame)?;
             if control.packet_type == PacketType::Ack {
-                bytes_acked += CHUNK_SIZE as u64; // Approximation for progress bar
-                pb.set_position(bytes_acked.min(file_size));
+                if let Some(size) = ack_sizes.remove(&control.sequence_no) {
+                    bytes_acked = bytes_acked.saturating_add(size as u64);
+                    pb.set_position(bytes_acked.min(file_size));
+                }
             }
             sender.handle_control_packet(&control)?;
         }
 
-        // Retransmit if needed
         sender.retransmit_due(&mut transport, now)?;
-
-        // Send new packets
         sender.send_available(&mut transport, now)?;
 
         if file_done && sender.is_empty() {
             break;
         }
 
-        // Small sleep to prevent busy-looping if transport recv would block
-        std::thread::sleep(std::time::Duration::from_millis(1));
+        std::thread::sleep(Duration::from_millis(1));
     }
 
     pb.set_position(file_size);
     pb.finish_with_message("Transfer complete");
 
-    // Send Finish packet
     let finish_packet = Packet::new(PacketType::Finish, sequence_no, vec![]);
     transport.send(&encode_packet(&finish_packet)?)?;
-
-    // Close transport
     transport.close()?;
 
     Ok(())
@@ -211,7 +234,6 @@ fn run_receive(
     let listener = TcpListener::bind(format!("0.0.0.0:{}", port))?;
     println!("Listening on port {}...", port);
 
-    // Start broadcasting discovery announcement unless disabled
     let token = PairingToken::generate();
     let broadcast_handle = if !no_discover {
         let beacon = Beacon::new();
@@ -229,7 +251,6 @@ fn run_receive(
         None
     };
 
-    // Broadcast in a background thread while waiting for a connection
     let stop_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let broadcast_thread = if let Some(handle) = broadcast_handle {
         let flag = stop_flag.clone();
@@ -246,7 +267,6 @@ fn run_receive(
     let mut transport = TcpTransport::accept(&listener)?;
     println!("Connection established.");
 
-    // Stop broadcasting once a connection is accepted
     stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
     if let Some(thread) = broadcast_thread {
         let _ = thread.join();
@@ -257,14 +277,18 @@ fn run_receive(
     let mut pb: Option<ProgressBar> = None;
     let mut file_size = 0u64;
     let mut bytes_received = 0u64;
+    let mut checkpoint: Option<ResumeCheckpoint> = None;
+    let mut checkpoint_path: Option<PathBuf> = None;
 
     loop {
         let frame = match transport.recv() {
             Ok(Some(f)) => f,
             Ok(None) => continue,
             Err(e) => {
-                // If the stream was closed gracefully or dropped, we can just break
                 if transport.is_closed() {
+                    println!(
+                        "Connection closed before transfer completion; checkpoint retained if present."
+                    );
                     break;
                 }
                 return Err(e.into());
@@ -285,15 +309,36 @@ fn run_receive(
                 file_size = u64::from_be_bytes(size_bytes);
 
                 let file_name = String::from_utf8_lossy(&packet.payload[8..]).into_owned();
-                let out_path = output_dir.join(
-                    Path::new(&file_name)
-                        .file_name()
-                        .unwrap_or_else(|| std::ffi::OsStr::new("received_file")),
-                );
+                let clean_name = Path::new(&file_name)
+                    .file_name()
+                    .unwrap_or_else(|| std::ffi::OsStr::new("received_file"))
+                    .to_string_lossy()
+                    .to_string();
+                let out_path = output_dir.join(&clean_name);
+                let cp_path = resume_checkpoint_path(&out_path);
+
+                let (resume_sequence, resume_bytes, open_file, cp) =
+                    prepare_resume_state(&out_path, &cp_path, &clean_name, file_size)?;
+
+                file = Some(open_file);
+                checkpoint = Some(cp);
+                checkpoint_path = Some(cp_path);
+                receiver = ReceiverWindow::with_next_expected(resume_sequence);
+                bytes_received = resume_bytes;
 
                 println!("Receiving '{}' ({} bytes)", out_path.display(), file_size);
-
-                file = Some(File::create(out_path)?);
+                if resume_bytes > 0 {
+                    println!(
+                        "Resuming existing transfer from sequence {} ({} bytes)",
+                        resume_sequence, resume_bytes
+                    );
+                    let resume_packet = Packet::new(
+                        PacketType::Resume,
+                        resume_sequence,
+                        resume_bytes.to_be_bytes().to_vec(),
+                    );
+                    transport.send(&encode_packet(&resume_packet)?)?;
+                }
 
                 let progress = ProgressBar::new(file_size);
                 progress.set_style(
@@ -303,6 +348,7 @@ fn run_receive(
                     .unwrap()
                     .progress_chars("#>-"),
                 );
+                progress.set_position(bytes_received.min(file_size));
                 pb = Some(progress);
             }
             PacketType::Data => {
@@ -316,11 +362,22 @@ fn run_receive(
                     transport.send(&encode_packet(&control)?)?;
                 }
 
-                for payload in receiver.drain_ordered() {
-                    bytes_received += payload.len() as u64;
-                    if let Some(f) = file.as_mut() {
-                        f.write_all(&payload)?;
+                let drained = receiver.drain_ordered_packets();
+                if !drained.is_empty() {
+                    for (_, payload) in drained {
+                        bytes_received = bytes_received.saturating_add(payload.len() as u64);
+                        if let Some(f) = file.as_mut() {
+                            f.write_all(&payload)?;
+                        }
                     }
+
+                    if let Some(cp) = checkpoint.as_mut() {
+                        cp.update(receiver.next_expected(), bytes_received);
+                        if let Some(path) = checkpoint_path.as_ref() {
+                            cp.save(path)?;
+                        }
+                    }
+
                     if let Some(p) = pb.as_ref() {
                         p.set_position(bytes_received.min(file_size));
                     }
@@ -331,15 +388,19 @@ fn run_receive(
                     p.set_position(file_size);
                     p.finish_with_message("Transfer complete");
                 }
+                if let Some(path) = checkpoint_path.as_ref() {
+                    ResumeCheckpoint::clear(path)?;
+                }
                 break;
             }
             PacketType::Close => {
                 println!("Connection closed by peer.");
                 break;
             }
-            _ => {
-                // Ignore other packets or log
+            PacketType::Resume => {
+                // Receiver ignores resume control packets.
             }
+            _ => {}
         }
     }
 
@@ -383,4 +444,167 @@ fn run_discover(token: Option<String>, timeout: u64) -> Result<(), Box<dyn std::
     }
 
     Ok(())
+}
+
+fn run_benchmark(
+    size_mb: usize,
+    iterations: usize,
+    latency_ticks: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let size_bytes = size_mb * 1024 * 1024;
+    let payload: Vec<u8> = (0..size_bytes).map(|idx| (idx % 251) as u8).collect();
+
+    println!(
+        "Benchmarking {} MiB transfer for {} iteration(s) with latency_ticks={}...",
+        size_mb, iterations, latency_ticks
+    );
+
+    let mut total_secs = 0.0;
+    for iteration in 0..iterations {
+        let started = Instant::now();
+        let packets = chunk_bytes(&payload, CHUNK_SIZE)?;
+        let mut sender = SenderWindow::new(WINDOW_SIZE, TIMEOUT_TICKS)?;
+        for packet in packets {
+            sender.enqueue(packet)?;
+        }
+        let mut receiver = ReceiverWindow::new();
+        let mut data_transport = MemoryTransport::new(MemoryTransportConfig {
+            latency_ticks,
+            reorder_every: Some(3),
+            ..MemoryTransportConfig::default()
+        });
+        let mut control_transport = MemoryTransport::new(MemoryTransportConfig {
+            latency_ticks,
+            ..MemoryTransportConfig::default()
+        });
+        let mut restored = Vec::with_capacity(payload.len());
+        let mut peak_sender_bytes = 0usize;
+        let mut peak_receiver_bytes = 0usize;
+
+        for tick in 0..200_000_u64 {
+            peak_sender_bytes = peak_sender_bytes.max(sender.buffered_payload_bytes());
+            peak_receiver_bytes = peak_receiver_bytes.max(receiver.buffered_payload_bytes());
+
+            sender.retransmit_due(&mut data_transport, tick)?;
+            sender.send_available(&mut data_transport, tick)?;
+
+            while let Some(frame) = data_transport.recv()? {
+                let packet = parse_packet(&frame)?;
+                let controls = receiver.receive_data_packet(packet)?;
+                for (_, payload) in receiver.drain_ordered_packets() {
+                    restored.extend_from_slice(&payload);
+                }
+                for control in controls {
+                    control_transport.send(&encode_packet(&control)?)?;
+                }
+            }
+
+            while let Some(frame) = control_transport.recv()? {
+                let control = parse_packet(&frame)?;
+                sender.handle_control_packet(&control)?;
+            }
+
+            if sender.is_empty() && restored == payload {
+                break;
+            }
+
+            data_transport.tick();
+            control_transport.tick();
+        }
+
+        let elapsed = started.elapsed();
+        let secs = elapsed.as_secs_f64();
+        total_secs += secs;
+        let throughput_mib = if secs > 0.0 {
+            (size_bytes as f64 / (1024.0 * 1024.0)) / secs
+        } else {
+            0.0
+        };
+
+        println!(
+            "Iteration {}: {:.2} MiB/s, peak sender buffer {} KiB, peak receiver buffer {} KiB",
+            iteration + 1,
+            throughput_mib,
+            peak_sender_bytes / 1024,
+            peak_receiver_bytes / 1024,
+        );
+    }
+
+    let avg_secs = total_secs / iterations as f64;
+    let avg_throughput_mib = if avg_secs > 0.0 {
+        (size_bytes as f64 / (1024.0 * 1024.0)) / avg_secs
+    } else {
+        0.0
+    };
+    println!("Average throughput: {:.2} MiB/s", avg_throughput_mib);
+
+    Ok(())
+}
+
+fn negotiate_resume(
+    transport: &mut TcpTransport,
+) -> Result<(u32, u64), Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + RESUME_NEGOTIATION_TIMEOUT;
+    while Instant::now() < deadline {
+        match transport.recv()? {
+            Some(frame) => {
+                let packet = parse_packet(&frame)?;
+                if packet.packet_type == PacketType::Resume {
+                    if packet.payload.len() != 8 {
+                        return Ok((packet.sequence_no, 0));
+                    }
+                    let mut bytes = [0u8; 8];
+                    bytes.copy_from_slice(&packet.payload);
+                    return Ok((packet.sequence_no, u64::from_be_bytes(bytes)));
+                }
+            }
+            None => std::thread::sleep(Duration::from_millis(5)),
+        }
+    }
+
+    Ok((0, 0))
+}
+
+fn resume_checkpoint_path(out_path: &Path) -> PathBuf {
+    let file_name = out_path
+        .file_name()
+        .unwrap_or_else(|| std::ffi::OsStr::new("received_file"))
+        .to_string_lossy();
+    out_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!("{}.aether.resume.json", file_name))
+}
+
+fn prepare_resume_state(
+    out_path: &Path,
+    checkpoint_path: &Path,
+    file_name: &str,
+    file_size: u64,
+) -> Result<(u32, u64, File, ResumeCheckpoint), Box<dyn std::error::Error>> {
+    if checkpoint_path.exists() {
+        let checkpoint = ResumeCheckpoint::load(checkpoint_path)?;
+        if checkpoint.matches(file_name, file_size, CHUNK_SIZE) {
+            let mut file = OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .truncate(false)
+                .open(out_path)?;
+            file.seek(SeekFrom::Start(checkpoint.bytes_written))?;
+            return Ok((
+                checkpoint.next_sequence,
+                checkpoint.bytes_written,
+                file,
+                checkpoint,
+            ));
+        }
+
+        ResumeCheckpoint::clear(checkpoint_path)?;
+    }
+
+    let file = File::create(out_path)?;
+    let checkpoint = ResumeCheckpoint::new(file_name.to_string(), file_size, CHUNK_SIZE);
+    checkpoint.save(checkpoint_path)?;
+    Ok((0, 0, file, checkpoint))
 }
