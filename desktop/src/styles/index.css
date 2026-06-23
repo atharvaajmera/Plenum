@@ -47,16 +47,21 @@ body {
 .top-nav {
   display: flex;
   align-items: center;
-  padding: 16px 24px;
-  background-color: var(--bg-sidebar);
-  border-bottom: 1px solid var(--border-color);
+  justify-content: space-between;
+  padding: 24px 32px;
+  background-color: transparent;
+}
+
+.nav-left {
+  display: flex;
+  align-items: center;
   gap: 12px;
 }
 
 .nav-logo {
   width: 28px;
   height: 28px;
-  border-radius: 50%;
+  border-radius: 4px;
   background-color: var(--accent-primary);
   overflow: hidden;
 }
@@ -308,7 +313,17 @@ body {
   gap: 16px;
   margin-top: 48px;
   width: 100%;
-  max-width: 300px;
+  max-width: 340px;
+}
+
+.nav-buttons-row {
+  display: flex;
+  gap: 16px;
+  width: 100%;
+}
+
+.nav-buttons-row .big-nav-btn {
+  flex: 1;
 }
 
 .big-nav-btn {
