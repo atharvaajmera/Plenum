@@ -1,3 +1,5 @@
+pub mod commands;
+
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -9,12 +11,38 @@ fn get_device_name() -> String {
     whoami::devicename().unwrap_or_else(|_| "Unknown Device".to_string())
 }
 
+#[tauri::command]
+fn get_username() -> String {
+    whoami::username().unwrap_or_else(|_| "User".to_string())
+}
+
+#[tauri::command]
+fn get_local_ip() -> String {
+    match std::net::UdpSocket::bind("0.0.0.0:0") {
+        Ok(socket) => {
+            match socket.connect("8.8.8.8:80") {
+                Ok(()) => socket.local_addr().map(|addr| addr.ip().to_string()).unwrap_or_else(|_| "127.0.0.1".to_string()),
+                Err(_) => "127.0.0.1".to_string(),
+            }
+        }
+        Err(_) => "127.0.0.1".to_string(),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet, get_device_name])
+        .invoke_handler(tauri::generate_handler![
+            greet, 
+            get_device_name,
+            get_username,
+            get_local_ip,
+            commands::send_file_command,
+            commands::receive_file_command,
+            commands::discover_peers_command
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -1,21 +1,49 @@
 :root {
   /* Using Aether Logo extracted colors */
   --bg-app: #181f2a;
-  --bg-sidebar: #2c3949; /* Logo dominant color */
+  --bg-sidebar: #2c3949;
+  /* Logo dominant color */
   --bg-card: #222c3a;
   --bg-card-hover: #2a3748;
-  
+
   --text-primary: #f8fafc;
   --text-secondary: #94a3b8;
-  
-  --accent-primary: #59b286; /* Logo green */
-  --accent-primary-hover: #469285; /* Logo dark teal */
-  --accent-pill: #290e7f; /* Logo deep violet */
+
+  --accent-primary: #59b286;
+  /* Logo green */
+  --accent-primary-hover: #469285;
+  /* Logo dark teal */
+  --accent-pill: #290e7f;
+  /* Logo deep violet */
   --accent-pill-hover: #3b16a8;
-  
+
   --border-color: #3b4b5e;
-  
+
   --font-main: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+:root[data-theme="light"] {
+  --bg-app: #f1f5f9;
+  --bg-sidebar: #e2e8f0;
+  --bg-card: #ffffff;
+  --bg-card-hover: #f8fafc;
+  --text-primary: #0f172a;
+  --text-secondary: #64748b;
+  --border-color: #cbd5e1;
+}
+
+:root[data-color="ocean"] {
+  --accent-primary: #3b82f6;
+  --accent-primary-hover: #2563eb;
+  --accent-pill: #1e3a8a;
+  --accent-pill-hover: #1e40af;
+}
+
+:root[data-color="forest"] {
+  --accent-primary: #10b981;
+  --accent-primary-hover: #059669;
+  --accent-pill: #064e3b;
+  --accent-pill-hover: #065f46;
 }
 
 * {
@@ -31,7 +59,8 @@ body {
   height: 100vh;
   width: 100vw;
   overflow: hidden;
-  user-select: none; /* Make it feel more like an app */
+  user-select: none;
+  /* Make it feel more like an app */
 }
 
 #root {
@@ -85,6 +114,11 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
+  scrollbar-width: none;
+}
+
+.main-content::-webkit-scrollbar {
+  display: none;
 }
 
 .page-header {
@@ -101,7 +135,6 @@ body {
   cursor: pointer;
   padding: 8px;
   border-radius: 50%;
-  transition: all 0.2s;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -143,7 +176,6 @@ body {
   justify-content: center;
   gap: 16px;
   cursor: pointer;
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   border: 1px solid var(--border-color);
   box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
 }
@@ -151,7 +183,6 @@ body {
 .action-card:hover {
   background: linear-gradient(145deg, var(--bg-card-hover), rgba(89, 178, 134, 0.1));
   border-color: var(--accent-primary);
-  transform: translateY(-2px);
   box-shadow: 0 8px 15px rgba(0, 0, 0, 0.2);
 }
 
@@ -218,38 +249,66 @@ body {
 
 .ring-wrapper {
   position: relative;
-  width: 160px;
-  height: 160px;
+  width: 100px;
+  height: 100px;
   display: flex;
   align-items: center;
   justify-content: center;
-  margin-bottom: 32px;
+  margin-bottom: 24px;
 }
 
 .core-circle {
-  width: 80px;
-  height: 80px;
+  width: 48px;
+  height: 48px;
   border-radius: 50%;
-  background-color: var(--accent-primary);
+  background: linear-gradient(135deg, var(--accent-primary), var(--accent-pill));
   z-index: 2;
-  box-shadow: 0 0 20px rgba(97, 203, 166, 0.4);
+  box-shadow: 0 0 16px rgba(97, 203, 166, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: pulseCore 3s ease-in-out infinite;
 }
 
 .segmented-ring {
   position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
+  top: 50%;
+  left: 50%;
+  width: 48px;
+  height: 48px;
+  margin-top: -24px;
+  margin-left: -24px;
   border-radius: 50%;
-  border: 12px dashed var(--accent-primary);
-  opacity: 0.8;
-  animation: rotate 20s linear infinite;
+  border: 2px solid var(--accent-primary);
+  opacity: 0;
+  animation: ripple 3s cubic-bezier(0.1, 0.5, 0.3, 1) infinite;
+  pointer-events: none;
 }
 
-@keyframes rotate {
-  0% { transform: rotate(0deg); }
-  100% { transform: rotate(360deg); }
+.segmented-ring::after {
+  content: '';
+  position: absolute;
+  top: -2px;
+  left: -2px;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  border: 2px solid var(--accent-pill);
+  opacity: 0;
+  animation: ripple 3s cubic-bezier(0.1, 0.5, 0.3, 1) infinite;
+  animation-delay: 1.5s;
+  pointer-events: none;
+}
+
+@keyframes pulseCore {
+  0% { transform: scale(1); box-shadow: 0 0 16px rgba(97, 203, 166, 0.4); }
+  50% { transform: scale(1.05); box-shadow: 0 0 24px rgba(97, 203, 166, 0.6); }
+  100% { transform: scale(1); box-shadow: 0 0 16px rgba(97, 203, 166, 0.4); }
+}
+
+@keyframes ripple {
+  0% { transform: scale(1); opacity: 0.8; }
+  100% { transform: scale(2.2); opacity: 0; }
 }
 
 .device-name {
@@ -271,7 +330,6 @@ body {
   border-radius: 14px;
   position: relative;
   cursor: pointer;
-  transition: all 0.3s;
 }
 
 .toggle.on {
@@ -286,7 +344,6 @@ body {
   position: absolute;
   top: 4px;
   left: 4px;
-  transition: all 0.3s;
 }
 
 .toggle.on .toggle-knob {
@@ -294,17 +351,26 @@ body {
   left: 24px;
 }
 
-.pill-select {
+select.pill-select {
   background-color: var(--bg-sidebar);
   border-radius: 8px;
-  padding: 8px 16px;
+  padding: 8px 12px;
   color: var(--text-primary);
   font-size: 14px;
   font-weight: 500;
-  display: flex;
-  align-items: center;
-  gap: 8px;
+  border: 1px solid var(--border-color);
+  outline: none;
   cursor: pointer;
+  font-family: inherit;
+}
+
+select.pill-select:focus {
+  border-color: var(--accent-primary);
+}
+
+select.pill-select option {
+  background-color: var(--bg-sidebar);
+  color: var(--text-primary);
 }
 
 .nav-buttons-container {
@@ -339,17 +405,40 @@ body {
   font-size: 16px;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.2s;
   text-decoration: none;
 }
 
 .big-nav-btn:hover {
   background-color: var(--bg-card-hover);
   border-color: var(--accent-primary);
-  transform: translateY(-2px);
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
 }
 
 .big-nav-btn svg {
   color: var(--accent-primary);
+}
+
+.info-popover {
+  position: absolute;
+  top: calc(100% + 12px);
+  right: 0;
+  background-color: var(--bg-card);
+  padding: 24px;
+  border-radius: 12px;
+  width: 360px;
+  border: 1px solid var(--border-color);
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.4);
+  z-index: 1000;
+  color: var(--text-primary);
+  text-align: left;
+}
+
+.status-message {
+  padding: 12px 24px;
+  background-color: var(--accent-primary);
+  color: var(--bg-app);
+  border-radius: 8px;
+  font-weight: 500;
+  margin-bottom: 24px;
+  text-align: center;
 }

@@ -6,10 +6,20 @@ import { invoke } from "@tauri-apps/api/core";
 const HomePage: React.FC = () => {
   const navigate = useNavigate();
   const [deviceName, setDeviceName] = useState<string>("Loading...");
+  const [localIp, setLocalIp] = useState<string>("");
+  const [username, setUsername] = useState<string>("");
 
   useEffect(() => {
     invoke<string>("get_device_name")
       .then((name) => setDeviceName(name))
+      .catch(console.error);
+      
+    invoke<string>("get_local_ip")
+      .then((ip) => setLocalIp(ip))
+      .catch(console.error);
+
+    invoke<string>("get_username")
+      .then((user) => setUsername(user))
       .catch(console.error);
   }, []);
 
@@ -21,7 +31,7 @@ const HomePage: React.FC = () => {
       </div>
       
       <h1 className="device-name">{deviceName}</h1>
-      <div className="device-id">#A3 #B9</div>
+      <div className="device-id">{localIp} {username ? `• ${username}` : ''}</div>
 
       <div className="nav-buttons-container">
         <div className="nav-buttons-row">
