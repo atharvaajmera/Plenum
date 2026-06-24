@@ -1,29 +1,71 @@
-import React from "react";
+import React, { useState } from "react";
 import { File, Folder, AlignLeft, ClipboardPaste, RefreshCcw, Monitor, Heart, Settings } from "lucide-react";
+import { open } from "@tauri-apps/plugin-dialog";
 
 const SendPage: React.FC = () => {
+  const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  const [selectionType, setSelectionType] = useState<"file" | "folder" | "text" | "paste" | null>(null);
+
+  const handleSelectFile = async () => {
+    try {
+      const selected = await open({ multiple: false, directory: false });
+      if (selected && !Array.isArray(selected)) {
+        setSelectedPath(selected);
+        setSelectionType("file");
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleSelectFolder = async () => {
+    try {
+      const selected = await open({ multiple: false, directory: true });
+      if (selected && !Array.isArray(selected)) {
+        setSelectedPath(selected);
+        setSelectionType("folder");
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleSelectText = () => {
+    setSelectionType("text");
+    setSelectedPath("Text Input selected");
+  };
+
+  const handleSelectPaste = async () => {
+    setSelectionType("paste");
+    setSelectedPath("Clipboard Content selected");
+  };
   return (
     <div>
       <div className="card-section">
         <h2 className="section-title">Selection</h2>
         <div className="card-grid">
-          <div className="action-card">
+          <div className="action-card" onClick={handleSelectFile} style={{ borderColor: selectionType === "file" ? "var(--accent-primary)" : "var(--border-color)" }}>
             <File size={28} />
             <span>File</span>
           </div>
-          <div className="action-card">
+          <div className="action-card" onClick={handleSelectFolder} style={{ borderColor: selectionType === "folder" ? "var(--accent-primary)" : "var(--border-color)" }}>
             <Folder size={28} />
             <span>Folder</span>
           </div>
-          <div className="action-card">
+          <div className="action-card" onClick={handleSelectText} style={{ borderColor: selectionType === "text" ? "var(--accent-primary)" : "var(--border-color)" }}>
             <AlignLeft size={28} />
             <span>Text</span>
           </div>
-          <div className="action-card">
+          <div className="action-card" onClick={handleSelectPaste} style={{ borderColor: selectionType === "paste" ? "var(--accent-primary)" : "var(--border-color)" }}>
             <ClipboardPaste size={28} />
             <span>Paste</span>
           </div>
         </div>
+        {selectedPath && (
+          <div style={{ marginTop: "12px", fontSize: "13px", color: "var(--text-secondary)" }}>
+            Selected: <span style={{ color: "var(--text-primary)" }}>{selectedPath.split(/[/\\]/).pop()}</span>
+          </div>
+        )}
       </div>
 
       <div className="card-section">
