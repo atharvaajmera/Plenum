@@ -192,19 +192,21 @@ impl AetherCore {
         create_dir_all(&request.output_dir)?;
 
         let listener = TcpListener::bind(format!("0.0.0.0:{}", request.port))?;
+        let actual_port = listener.local_addr()?.port();
+        
         sink.emit(AetherEvent::Transfer(TransferEvent::StateChanged {
             direction: TransferDirection::Receive,
             state: ConnectionState::Listening,
-            peer: Some(format!("0.0.0.0:{}", request.port)),
+            peer: Some(format!("0.0.0.0:{}", actual_port)),
         }));
 
         let token = PairingToken::generate();
         let broadcast_handle = if request.announce_on_lan {
             let beacon = Beacon::new();
-            let handle = beacon.broadcast(&token, request.port)?;
+            let handle = beacon.broadcast(&token, actual_port)?;
             sink.emit(AetherEvent::Discovery(DiscoveryEvent::BroadcastStarted {
                 token: token.code().to_string(),
-                port: request.port,
+                port: actual_port,
             }));
             Some(handle)
         } else {
