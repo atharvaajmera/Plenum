@@ -207,7 +207,7 @@ pub enum BenchmarkEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum AetherEvent {
+pub enum PlenumEvent {
     Log { level: LogLevel, message: String },
     Transfer(TransferEvent),
     Discovery(DiscoveryEvent),
@@ -215,14 +215,14 @@ pub enum AetherEvent {
 }
 
 pub trait EventSink {
-    fn emit(&mut self, event: AetherEvent);
+    fn emit(&mut self, event: PlenumEvent);
 }
 
 impl<F> EventSink for F
 where
-    F: FnMut(AetherEvent),
+    F: FnMut(PlenumEvent),
 {
-    fn emit(&mut self, event: AetherEvent) {
+    fn emit(&mut self, event: PlenumEvent) {
         self(event);
     }
 }

@@ -1,7 +1,7 @@
 use rand::rngs::StdRng;
 use rand::{Rng, RngCore, SeedableRng};
 
-use aether::protocol::{Packet, PacketType, encode_packet, parse_packet};
+use plenum::protocol::{Packet, PacketType, encode_packet, parse_packet};
 
 #[test]
 fn parser_handles_random_bytes_without_panicking() {

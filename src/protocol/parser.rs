@@ -4,7 +4,7 @@ use crate::protocol::ProtocolError;
 use crate::protocol::checksum::compute_checksum;
 use crate::protocol::packet::{CHECKSUM_LEN, HEADER_LEN, Packet, PacketType};
 
-/// Parses one complete packet from the Aether binary wire format.
+/// Parses one complete packet from the Plenum binary wire format.
 ///
 /// The input must contain exactly one packet. Extra bytes are rejected so callers
 /// do not accidentally ignore malformed framing boundaries.

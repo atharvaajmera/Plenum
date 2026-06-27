@@ -1,10 +1,10 @@
-use aether::protocol::{
+use plenum::protocol::{
     CHECKSUM_LEN, HEADER_LEN, Packet, PacketType, ProtocolError, encode_packet, parse_packet,
 };
 
 #[test]
 fn encodes_and_decodes_valid_packet() {
-    let packet = Packet::new(PacketType::Data, 42, b"hello aether".to_vec());
+    let packet = Packet::new(PacketType::Data, 42, b"hello plenum".to_vec());
 
     let encoded = encode_packet(&packet).expect("packet should encode");
     let decoded = parse_packet(&encoded).expect("packet should parse");

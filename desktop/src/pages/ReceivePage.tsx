@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
-import { AetherEvent, ReceiveRequest, TransferSummary } from "../types/rust";
+import { PlenumEvent, ReceiveRequest, TransferSummary } from "../types/rust";
 
 const ReceivePage: React.FC = () => {
   const [deviceName, setDeviceName] = useState<string>("Loading...");
@@ -19,7 +19,7 @@ const ReceivePage: React.FC = () => {
 
     const setupReceiver = async () => {
       // 1. Listen for events
-      unlisten = await listen<AetherEvent>("aether-event", (event) => {
+      unlisten = await listen<PlenumEvent>("plenum-event", (event) => {
         const payload = event.payload;
         if ("Discovery" in payload) {
            const disc = payload.Discovery;

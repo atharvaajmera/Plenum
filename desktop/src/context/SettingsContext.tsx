@@ -13,7 +13,7 @@ export interface ReceiveSettings {
 
 export interface SettingsState {
   themeIndex: number; // 0=System, 1=Dark, 2=Light
-  colorIndex: number; // 0=Aether, 1=Ocean, 2=Forest
+  colorIndex: number; // 0=Plenum, 1=Ocean, 2=Forest
   general: GeneralSettings;
   receive: ReceiveSettings;
 }
@@ -62,13 +62,13 @@ export const applyThemeToDom = (settings: SettingsState) => {
   // Apply Color
   if (settings.colorIndex === 1) doc.setAttribute("data-color", "ocean");
   else if (settings.colorIndex === 2) doc.setAttribute("data-color", "forest");
-  else doc.removeAttribute("data-color"); // Default Aether
+  else doc.removeAttribute("data-color"); // Default Plenum
 };
 
 export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [settings, setSettings] = useState<SettingsState>(() => {
     try {
-      const stored = localStorage.getItem("aether-settings");
+      const stored = localStorage.getItem("plenum-settings");
       return stored ? JSON.parse(stored) : defaultSettings;
     } catch {
       return defaultSettings;
@@ -85,7 +85,7 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   };
 
   const saveSettings = () => {
-    localStorage.setItem("aether-settings", JSON.stringify(settings));
+    localStorage.setItem("plenum-settings", JSON.stringify(settings));
     applyThemeToDom(settings);
   };
 

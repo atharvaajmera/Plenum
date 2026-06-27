@@ -1,5 +1,5 @@
-use aether::protocol::{Packet, PacketType, encode_packet, parse_packet};
-use aether::stream::{StreamError, chunk_bytes, reassemble_packets};
+use plenum::protocol::{Packet, PacketType, encode_packet, parse_packet};
+use plenum::stream::{StreamError, chunk_bytes, reassemble_packets};
 
 #[test]
 fn chunks_small_buffer_with_sequence_numbers() {

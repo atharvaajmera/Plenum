@@ -1,7 +1,7 @@
-use aether::flow::{FlowError, ReceiverWindow, SenderWindow};
-use aether::protocol::{Packet, PacketType, encode_packet, parse_packet};
-use aether::stream::chunk_bytes;
-use aether::transport::{MemoryTransport, MemoryTransportConfig, Transport};
+use plenum::flow::{FlowError, ReceiverWindow, SenderWindow};
+use plenum::protocol::{Packet, PacketType, encode_packet, parse_packet};
+use plenum::stream::chunk_bytes;
+use plenum::transport::{MemoryTransport, MemoryTransportConfig, Transport};
 
 #[test]
 fn sender_respects_window_capacity_and_advances_on_ack() {

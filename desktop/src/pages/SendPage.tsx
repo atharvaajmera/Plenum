@@ -3,7 +3,7 @@ import { File, Folder, AlignLeft, ClipboardPaste, RefreshCcw, Monitor, Heart, Se
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
-import { AetherEvent, DiscoverRequest, DiscoverySummary, SendRequest, TransferSummary } from "../types/rust";
+import { PlenumEvent, DiscoverRequest, DiscoverySummary, SendRequest, TransferSummary } from "../types/rust";
 
 const SendPage: React.FC = () => {
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
@@ -34,7 +34,7 @@ const SendPage: React.FC = () => {
     let unlisten: UnlistenFn | undefined;
 
     const setupListener = async () => {
-      unlisten = await listen<AetherEvent>("aether-event", (event) => {
+      unlisten = await listen<PlenumEvent>("plenum-event", (event) => {
         const payload = event.payload;
         if ("Discovery" in payload) {
            const disc = payload.Discovery;

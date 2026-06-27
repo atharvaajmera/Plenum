@@ -67,7 +67,7 @@ export type DiscoveryEvent =
     | { PeerFound: DiscoverySummary }
     | "PeerNotFound";
 
-export type AetherEvent = 
+export type PlenumEvent = 
     | { Log: { level: string, message: string } }
     | { Transfer: TransferEvent }
     | { Discovery: DiscoveryEvent };

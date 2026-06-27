@@ -1,7 +1,7 @@
 use tauri::{AppHandle, Emitter};
-use aether::app::engine::AetherCore;
-use aether::app::types::{
-    AetherEvent, DiscoverRequest, DiscoverySummary, ReceiveRequest, SendRequest,
+use plenum::app::engine::PlenumCore;
+use plenum::app::types::{
+    PlenumEvent, DiscoverRequest, DiscoverySummary, ReceiveRequest, SendRequest,
     TransferSummary,
 };
 
@@ -11,9 +11,9 @@ pub async fn send_file_command(
     request: SendRequest,
 ) -> Result<TransferSummary, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let mut core = AetherCore::new();
-        let mut sink = |event: AetherEvent| {
-            let _ = app.emit("aether-event", event);
+        let mut core = PlenumCore::new();
+        let mut sink = |event: PlenumEvent| {
+            let _ = app.emit("plenum-event", event);
         };
         core.send_file(request, &mut sink).map_err(|e| e.to_string())
     })
@@ -27,9 +27,9 @@ pub async fn receive_file_command(
     request: ReceiveRequest,
 ) -> Result<TransferSummary, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let mut core = AetherCore::new();
-        let mut sink = |event: AetherEvent| {
-            let _ = app.emit("aether-event", event);
+        let mut core = PlenumCore::new();
+        let mut sink = |event: PlenumEvent| {
+            let _ = app.emit("plenum-event", event);
         };
         core.receive_file(request, &mut sink).map_err(|e| e.to_string())
     })
@@ -43,9 +43,9 @@ pub async fn discover_peers_command(
     request: DiscoverRequest,
 ) -> Result<DiscoverySummary, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let mut core = AetherCore::new();
-        let mut sink = |event: AetherEvent| {
-            let _ = app.emit("aether-event", event);
+        let mut core = PlenumCore::new();
+        let mut sink = |event: PlenumEvent| {
+            let _ = app.emit("plenum-event", event);
         };
         core.discover_peer(request, &mut sink).map_err(|e| e.to_string())
     })

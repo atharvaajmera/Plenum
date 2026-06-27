@@ -4,7 +4,7 @@ use crate::protocol::ProtocolError;
 use crate::protocol::checksum::compute_checksum;
 use crate::protocol::packet::{CHECKSUM_LEN, HEADER_LEN, Packet};
 
-/// Encodes a packet into the Aether binary wire format.
+/// Encodes a packet into the Plenum binary wire format.
 pub fn encode_packet(packet: &Packet) -> Result<Vec<u8>, ProtocolError> {
     let payload_len =
         u32::try_from(packet.payload.len()).map_err(|_| ProtocolError::PayloadTooLarge {

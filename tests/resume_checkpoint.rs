@@ -1,8 +1,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use aether::flow::ReceiverWindow;
-use aether::protocol::{Packet, PacketType};
-use aether::stream::ResumeCheckpoint;
+use plenum::flow::ReceiverWindow;
+use plenum::protocol::{Packet, PacketType};
+use plenum::stream::ResumeCheckpoint;
 
 #[test]
 fn checkpoint_roundtrip_persists_resume_metadata() {
@@ -10,7 +10,7 @@ fn checkpoint_roundtrip_persists_resume_metadata() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let path = std::env::temp_dir().join(format!("aether-resume-{unique}.json"));
+    let path = std::env::temp_dir().join(format!("plenum-resume-{unique}.json"));
 
     let mut checkpoint = ResumeCheckpoint::new("example.bin", 12345, 4096);
     checkpoint.update(7, 28672);

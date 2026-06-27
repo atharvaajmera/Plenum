@@ -23,9 +23,9 @@ const Layout: React.FC = () => {
             </button>
           )}
           <div className="nav-logo">
-            <img src="/aether-logo.png" alt="Aether Logo" />
+            <img src="/plenum-logo.png" alt="Plenum Logo" />
           </div>
-          <span className="nav-title">Aether</span>
+          <span className="nav-title">Plenum</span>
         </div>
         
         <div style={{ position: "relative" }}>
@@ -46,7 +46,7 @@ const Layout: React.FC = () => {
               zIndex: 100,
               boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
             }}>
-              <div style={{ fontSize: "14px", fontWeight: 600, marginBottom: "12px", color: "var(--text-primary)" }}>How to use Aether?</div>
+              <div style={{ fontSize: "14px", fontWeight: 600, marginBottom: "12px", color: "var(--text-primary)" }}>How to use Plenum?</div>
               <div style={{ fontSize: "13px", color: "var(--text-secondary)", lineHeight: 1.5 }}>
                 <strong style={{ color: "var(--text-primary)" }}>To Send:</strong> Select a file or folder, then choose a nearby device to securely transfer it over your local network.
                 <br /><br />

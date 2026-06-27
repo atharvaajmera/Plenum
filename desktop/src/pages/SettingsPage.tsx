@@ -2,7 +2,7 @@ import React, { useState, useEffect } from "react";
 import { useSettings } from "../context/SettingsContext";
 
 const SettingsPage: React.FC = () => {
-  const { settings, updateSettings, saveSettings } = useSettings();
+  const { settings, updateSettings } = useSettings();
 
   // Local state for the UI before saving
   const [generalSettings, setGeneralSettings] = useState(settings.general);
@@ -12,7 +12,7 @@ const SettingsPage: React.FC = () => {
   const [showSaved, setShowSaved] = useState(false);
 
   const themes = ["System", "Dark", "Light"];
-  const colors = ["Aether", "Ocean", "Forest"];
+  const colors = ["Plenum", "Ocean", "Forest"];
 
   const toggleGeneral = (key: keyof typeof generalSettings) => {
     setGeneralSettings(prev => ({ ...prev, [key]: !prev[key] }));
@@ -27,18 +27,6 @@ const SettingsPage: React.FC = () => {
       <div className="toggle-knob"></div>
     </div>
   );
-
-  const handleSave = async () => {
-    updateSettings({
-      themeIndex,
-      colorIndex,
-      general: generalSettings,
-      receive: receiveSettings,
-    });
-    // Give context a tick to update state before saving (or just directly pass to saveSettings if we implemented it to take args, but useEffect in context handles it, wait no.
-    // Actually, saveSettings in context saves the current state. So we need to call updateSettings, then saveSettings.
-    // However, setState is async. The best way is to let the user save, wait, and call context.saveSettings()
-  };
 
   useEffect(() => {
     // If settings change in context, we sync them (though typically not needed if this is the only modifier)
@@ -58,7 +46,7 @@ const SettingsPage: React.FC = () => {
       general: generalSettings,
       receive: receiveSettings,
     };
-    localStorage.setItem("aether-settings", JSON.stringify(newSettings));
+    localStorage.setItem("plenum-settings", JSON.stringify(newSettings));
     
     // Call the standalone apply function from context
     import("../context/SettingsContext").then(({ applyThemeToDom }) => {

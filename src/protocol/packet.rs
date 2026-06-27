@@ -13,7 +13,7 @@ pub const HEADER_LEN: usize = 9;
 /// Number of bytes in the packet checksum.
 pub const CHECKSUM_LEN: usize = 32;
 
-/// Packet categories supported by the Aether protocol.
+/// Packet categories supported by the Plenum protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PacketType {
     Data,
@@ -52,7 +52,7 @@ impl PacketType {
     }
 }
 
-/// A decoded Aether protocol packet.
+/// A decoded Plenum protocol packet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Packet {
     pub packet_type: PacketType,

@@ -1,5 +1,5 @@
-use aether::protocol::{Packet, PacketType, encode_packet, parse_packet};
-use aether::transport::{MemoryTransport, MemoryTransportConfig, Transport, TransportError};
+use plenum::protocol::{Packet, PacketType, encode_packet, parse_packet};
+use plenum::transport::{MemoryTransport, MemoryTransportConfig, Transport, TransportError};
 
 #[test]
 fn sends_and_receives_frames_immediately_by_default() {

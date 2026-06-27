@@ -1,6 +1,6 @@
-use aether::discovery::beacon::{Announcement, Beacon, BeaconConfig};
-use aether::discovery::error::DiscoveryError;
-use aether::discovery::token::PairingToken;
+use plenum::discovery::beacon::{Announcement, Beacon, BeaconConfig};
+use plenum::discovery::error::DiscoveryError;
+use plenum::discovery::token::PairingToken;
 
 use std::net::Ipv4Addr;
 use std::time::Duration;

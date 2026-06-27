@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use aether::security::{
+use plenum::security::{
     AuthenticatedPairingToken, ReplayProtector, SecurityError, SessionCipher, SessionId,
 };
 

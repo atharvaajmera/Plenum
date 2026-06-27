@@ -12,7 +12,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::app::error::AppError;
 use crate::app::types::{
-    AetherEvent, BenchmarkEvent, BenchmarkIterationSummary, BenchmarkRequest, BenchmarkSummary,
+    PlenumEvent, BenchmarkEvent, BenchmarkIterationSummary, BenchmarkRequest, BenchmarkSummary,
     ConnectionState, CorePermissions, DiscoverRequest, DiscoveryEvent, DiscoverySummary, EventSink,
     PermissionKind, ReceiveRequest, SendRequest, TransferDirection, TransferEvent,
 };
@@ -26,11 +26,11 @@ use crate::transport::{MemoryTransport, MemoryTransportConfig, TcpTransport, Tra
 const RESUME_NEGOTIATION_TIMEOUT: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Default)]
-pub struct AetherCore {
+pub struct PlenumCore {
     signaling: SignalingState,
 }
 
-impl AetherCore {
+impl PlenumCore {
     pub fn new() -> Self {
         Self::default()
     }
@@ -54,7 +54,7 @@ impl AetherCore {
         let address = match request.address.clone() {
             Some(addr) => addr,
             None => {
-                sink.emit(AetherEvent::Transfer(TransferEvent::StateChanged {
+                sink.emit(PlenumEvent::Transfer(TransferEvent::StateChanged {
                     direction: TransferDirection::Send,
                     state: ConnectionState::Discovering,
                     peer: None,
@@ -71,13 +71,22 @@ impl AetherCore {
             }
         };
 
-        sink.emit(AetherEvent::Transfer(TransferEvent::StateChanged {
+        sink.emit(PlenumEvent::Transfer(TransferEvent::StateChanged {
             direction: TransferDirection::Send,
             state: ConnectionState::Connecting,
             peer: Some(address.clone()),
         }));
-        let mut transport = TcpTransport::connect(&address)?;
-        sink.emit(AetherEvent::Transfer(TransferEvent::StateChanged {
+        let tcp_transport = TcpTransport::connect(&address)?;
+        
+        // Dummy control path for now, until relay transport is implemented
+        let control_transport = MemoryTransport::new(MemoryTransportConfig::default());
+        
+        let mut transport = crate::transport::MultipathTransport::new(
+            Box::new(tcp_transport),
+            Box::new(control_transport),
+        );
+        
+        sink.emit(PlenumEvent::Transfer(TransferEvent::StateChanged {
             direction: TransferDirection::Send,
             state: ConnectionState::Connected,
             peer: Some(address.clone()),
@@ -94,7 +103,7 @@ impl AetherCore {
 
         let (mut sequence_no, resume_bytes) = negotiate_resume(&mut transport)?;
         if resume_bytes > 0 {
-            sink.emit(AetherEvent::Transfer(TransferEvent::Resumed {
+            sink.emit(PlenumEvent::Transfer(TransferEvent::Resumed {
                 direction: TransferDirection::Send,
                 next_sequence: sequence_no,
                 resumed_bytes: resume_bytes,
@@ -102,7 +111,7 @@ impl AetherCore {
             file.seek(SeekFrom::Start(resume_bytes))?;
         }
 
-        sink.emit(AetherEvent::Transfer(TransferEvent::Started {
+        sink.emit(PlenumEvent::Transfer(TransferEvent::Started {
             direction: TransferDirection::Send,
             file_name: file_name.clone(),
             total_bytes: file_size,
@@ -136,7 +145,7 @@ impl AetherCore {
                 if control.packet_type == PacketType::Ack {
                     if let Some(size) = ack_sizes.remove(&control.sequence_no) {
                         bytes_acked = bytes_acked.saturating_add(size as u64);
-                        sink.emit(AetherEvent::Transfer(TransferEvent::Progress {
+                        sink.emit(PlenumEvent::Transfer(TransferEvent::Progress {
                             direction: TransferDirection::Send,
                             transferred_bytes: bytes_acked.min(file_size),
                             total_bytes: file_size,
@@ -172,10 +181,10 @@ impl AetherCore {
             resumed_bytes: resume_bytes,
             elapsed_ms: started_at.elapsed().as_millis(),
         };
-        sink.emit(AetherEvent::Transfer(TransferEvent::Completed(
+        sink.emit(PlenumEvent::Transfer(TransferEvent::Completed(
             summary.clone(),
         )));
-        sink.emit(AetherEvent::Transfer(TransferEvent::StateChanged {
+        sink.emit(PlenumEvent::Transfer(TransferEvent::StateChanged {
             direction: TransferDirection::Send,
             state: ConnectionState::Closed,
             peer: summary.peer.clone(),
@@ -194,7 +203,7 @@ impl AetherCore {
         let listener = TcpListener::bind(format!("0.0.0.0:{}", request.port))?;
         let actual_port = listener.local_addr()?.port();
         
-        sink.emit(AetherEvent::Transfer(TransferEvent::StateChanged {
+        sink.emit(PlenumEvent::Transfer(TransferEvent::StateChanged {
             direction: TransferDirection::Receive,
             state: ConnectionState::Listening,
             peer: Some(format!("0.0.0.0:{}", actual_port)),
@@ -204,7 +213,7 @@ impl AetherCore {
         let broadcast_handle = if request.announce_on_lan {
             let beacon = Beacon::new();
             let handle = beacon.broadcast(&token, actual_port)?;
-            sink.emit(AetherEvent::Discovery(DiscoveryEvent::BroadcastStarted {
+            sink.emit(PlenumEvent::Discovery(DiscoveryEvent::BroadcastStarted {
                 token: token.code().to_string(),
                 port: actual_port,
             }));
@@ -227,9 +236,16 @@ impl AetherCore {
         };
 
         let started_at = Instant::now();
-        let mut transport = TcpTransport::accept(&listener)?;
-        let peer = transport.peer_addr()?.to_string();
-        sink.emit(AetherEvent::Transfer(TransferEvent::StateChanged {
+        let tcp_transport = TcpTransport::accept(&listener)?;
+        let peer = tcp_transport.peer_addr()?.to_string();
+        
+        let control_transport = MemoryTransport::new(MemoryTransportConfig::default());
+        let mut transport = crate::transport::MultipathTransport::new(
+            Box::new(tcp_transport),
+            Box::new(control_transport),
+        );
+        
+        sink.emit(PlenumEvent::Transfer(TransferEvent::StateChanged {
             direction: TransferDirection::Receive,
             state: ConnectionState::Connected,
             peer: Some(peer.clone()),
@@ -296,7 +312,7 @@ impl AetherCore {
                     bytes_received = resume_bytes;
                     file_name = clean_name;
 
-                    sink.emit(AetherEvent::Transfer(TransferEvent::Started {
+                    sink.emit(PlenumEvent::Transfer(TransferEvent::Started {
                         direction: TransferDirection::Receive,
                         file_name: file_name.clone(),
                         total_bytes: file_size,
@@ -304,7 +320,7 @@ impl AetherCore {
                     }));
 
                     if resume_bytes > 0 {
-                        sink.emit(AetherEvent::Transfer(TransferEvent::Resumed {
+                        sink.emit(PlenumEvent::Transfer(TransferEvent::Resumed {
                             direction: TransferDirection::Receive,
                             next_sequence: resume_sequence,
                             resumed_bytes: resume_bytes,
@@ -337,7 +353,7 @@ impl AetherCore {
                             cp.update(receiver.next_expected(), bytes_received);
                             if let Some(path) = checkpoint_path.as_ref() {
                                 cp.save(path)?;
-                                sink.emit(AetherEvent::Transfer(
+                                sink.emit(PlenumEvent::Transfer(
                                     TransferEvent::CheckpointUpdated {
                                         checkpoint_path: path.clone(),
                                         next_sequence: cp.next_sequence,
@@ -347,7 +363,7 @@ impl AetherCore {
                             }
                         }
 
-                        sink.emit(AetherEvent::Transfer(TransferEvent::Progress {
+                        sink.emit(PlenumEvent::Transfer(TransferEvent::Progress {
                             direction: TransferDirection::Receive,
                             transferred_bytes: bytes_received.min(file_size),
                             total_bytes: file_size,
@@ -381,10 +397,10 @@ impl AetherCore {
             elapsed_ms: started_at.elapsed().as_millis(),
         };
         let _ = peak_receiver_buffered;
-        sink.emit(AetherEvent::Transfer(TransferEvent::Completed(
+        sink.emit(PlenumEvent::Transfer(TransferEvent::Completed(
             summary.clone(),
         )));
-        sink.emit(AetherEvent::Transfer(TransferEvent::StateChanged {
+        sink.emit(PlenumEvent::Transfer(TransferEvent::StateChanged {
             direction: TransferDirection::Receive,
             state: ConnectionState::Closed,
             peer: Some(peer),
@@ -398,7 +414,7 @@ impl AetherCore {
         sink: &mut S,
     ) -> Result<DiscoverySummary, AppError> {
         validate_discover_request(&request)?;
-        sink.emit(AetherEvent::Discovery(DiscoveryEvent::SearchStarted {
+        sink.emit(PlenumEvent::Discovery(DiscoveryEvent::SearchStarted {
             token: request.token.clone(),
             timeout_secs: request.timeout_secs,
         }));
@@ -421,13 +437,13 @@ impl AetherCore {
                     address,
                     token: announcement.token,
                 };
-                sink.emit(AetherEvent::Discovery(DiscoveryEvent::PeerFound(
+                sink.emit(PlenumEvent::Discovery(DiscoveryEvent::PeerFound(
                     summary.clone(),
                 )));
                 Ok(summary)
             }
             Err(crate::discovery::DiscoveryError::NoPeersFound) => {
-                sink.emit(AetherEvent::Discovery(DiscoveryEvent::PeerNotFound));
+                sink.emit(PlenumEvent::Discovery(DiscoveryEvent::PeerNotFound));
                 Err(AppError::from(
                     crate::discovery::DiscoveryError::NoPeersFound,
                 ))
@@ -457,7 +473,7 @@ impl AetherCore {
             ));
         }
 
-        sink.emit(AetherEvent::Benchmark(BenchmarkEvent::Started {
+        sink.emit(PlenumEvent::Benchmark(BenchmarkEvent::Started {
             size_mb: request.size_mb,
             iterations: request.iterations,
             latency_ticks: request.latency_ticks,
@@ -535,7 +551,7 @@ impl AetherCore {
                 peak_sender_buffered_bytes,
                 peak_receiver_buffered_bytes,
             };
-            sink.emit(AetherEvent::Benchmark(BenchmarkEvent::IterationCompleted(
+            sink.emit(PlenumEvent::Benchmark(BenchmarkEvent::IterationCompleted(
                 iteration_summary.clone(),
             )));
             iterations.push(iteration_summary);
@@ -552,7 +568,7 @@ impl AetherCore {
                 .unwrap_or(0.0),
             iterations,
         };
-        sink.emit(AetherEvent::Benchmark(BenchmarkEvent::Completed(
+        sink.emit(PlenumEvent::Benchmark(BenchmarkEvent::Completed(
             summary.clone(),
         )));
         Ok(summary)
@@ -658,7 +674,7 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
-fn negotiate_resume(transport: &mut TcpTransport) -> Result<(u32, u64), AppError> {
+fn negotiate_resume<T: Transport>(transport: &mut T) -> Result<(u32, u64), AppError> {
     let deadline = Instant::now() + RESUME_NEGOTIATION_TIMEOUT;
     while Instant::now() < deadline {
         match transport.recv()? {
@@ -688,7 +704,7 @@ fn resume_checkpoint_path(out_path: &Path) -> PathBuf {
     out_path
         .parent()
         .unwrap_or_else(|| Path::new("."))
-        .join(format!("{}.aether.resume.json", file_name))
+        .join(format!("{}.plenum.resume.json", file_name))
 }
 
 fn prepare_resume_state(

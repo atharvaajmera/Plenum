@@ -1,12 +1,12 @@
-use aether::app::{
-    AetherCore, AppError, BenchmarkRequest, CorePermissions, DiscoverRequest, PermissionKind,
+use plenum::app::{
+    PlenumCore, AppError, BenchmarkRequest, CorePermissions, DiscoverRequest, PermissionKind,
     TransferOptions,
 };
-use aether::signaling::SignalMessage;
+use plenum::signaling::SignalMessage;
 
 #[test]
 fn benchmark_api_runs_through_high_level_core() {
-    let mut core = AetherCore::new();
+    let mut core = PlenumCore::new();
     let mut events = Vec::new();
 
     let summary = core
@@ -28,7 +28,7 @@ fn benchmark_api_runs_through_high_level_core() {
 
 #[test]
 fn discover_api_requires_local_network_permission() {
-    let mut core = AetherCore::new();
+    let mut core = PlenumCore::new();
     let mut sink = |_event| {};
 
     let err = core
@@ -57,7 +57,7 @@ fn discover_api_requires_local_network_permission() {
 
 #[test]
 fn signaling_routes_through_high_level_core() {
-    let mut core = AetherCore::new();
+    let mut core = PlenumCore::new();
 
     core.handle_signal(SignalMessage::JoinSession {
         peer_id: "alice".into(),

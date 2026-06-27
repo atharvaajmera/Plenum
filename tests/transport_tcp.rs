@@ -2,8 +2,8 @@ use std::net::TcpListener;
 use std::thread;
 use std::time::Duration;
 
-use aether::protocol::{Packet, PacketType, encode_packet, parse_packet};
-use aether::transport::{TcpTransport, Transport, TransportError};
+use plenum::protocol::{Packet, PacketType, encode_packet, parse_packet};
+use plenum::transport::{TcpTransport, Transport, TransportError};
 
 fn wait_recv(transport: &mut TcpTransport) -> Vec<u8> {
     for _ in 0..100 {

@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use aether::app::{
-    AetherCore, AetherEvent, BenchmarkEvent, BenchmarkRequest, ConnectionState, CorePermissions,
+use plenum::app::{
+    PlenumCore, PlenumEvent, BenchmarkEvent, BenchmarkRequest, ConnectionState, CorePermissions,
     DiscoverRequest, DiscoveryEvent, LogLevel, ReceiveRequest, SendRequest, TransferEvent,
     TransferOptions,
 };
@@ -9,7 +9,7 @@ use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
 
 #[derive(Parser)]
-#[command(author, version, about = "Aether peer-to-peer file transfer engine", long_about = None)]
+#[command(author, version, about = "Plenum peer-to-peer file transfer engine", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -79,26 +79,26 @@ impl CliEventSink {
     }
 }
 
-impl aether::app::EventSink for CliEventSink {
-    fn emit(&mut self, event: AetherEvent) {
+impl plenum::app::EventSink for CliEventSink {
+    fn emit(&mut self, event: PlenumEvent) {
         match event {
-            AetherEvent::Log { level, message } => match level {
+            PlenumEvent::Log { level, message } => match level {
                 LogLevel::Error => eprintln!("{message}"),
                 _ => self.println(message),
             },
-            AetherEvent::Discovery(event) => match event {
+            PlenumEvent::Discovery(event) => match event {
                 DiscoveryEvent::SearchStarted {
                     token,
                     timeout_secs,
                 } => {
                     if let Some(token) = token {
                         self.println(format!(
-                            "Scanning local network for Aether peers ({}s timeout, token={})...",
+                            "Scanning local network for Plenum peers ({}s timeout, token={})...",
                             timeout_secs, token
                         ));
                     } else {
                         self.println(format!(
-                            "Scanning local network for Aether peers ({}s timeout)...",
+                            "Scanning local network for Plenum peers ({}s timeout)...",
                             timeout_secs
                         ));
                     }
@@ -119,7 +119,7 @@ impl aether::app::EventSink for CliEventSink {
                     self.println("No peers found on the local network.");
                 }
             },
-            AetherEvent::Transfer(event) => match event {
+            PlenumEvent::Transfer(event) => match event {
                 TransferEvent::StateChanged { state, peer, .. } => match state {
                     ConnectionState::Discovering => self.println("Discovering peer..."),
                     ConnectionState::Listening => {
@@ -208,7 +208,7 @@ impl aether::app::EventSink for CliEventSink {
                     ));
                 }
             },
-            AetherEvent::Benchmark(event) => match event {
+            PlenumEvent::Benchmark(event) => match event {
                 BenchmarkEvent::Started {
                     size_mb,
                     iterations,
@@ -241,7 +241,7 @@ impl aether::app::EventSink for CliEventSink {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    let mut core = AetherCore::new();
+    let mut core = PlenumCore::new();
     let mut sink = CliEventSink::new();
     let permissions = CorePermissions::desktop_defaults();
     let options = TransferOptions::default();
