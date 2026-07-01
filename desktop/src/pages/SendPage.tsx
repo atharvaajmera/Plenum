@@ -12,6 +12,7 @@ const SendPage: React.FC = () => {
   const [isDiscovering, setIsDiscovering] = useState(false);
   const [transferStatus, setTransferStatus] = useState<string>("");
   const [progress, setProgress] = useState<{ transferred: number, total: number } | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
 
   const startDiscovery = async () => {
     setIsDiscovering(true);
@@ -47,10 +48,10 @@ const SendPage: React.FC = () => {
            }
         } else if ("Transfer" in payload) {
            const trans = payload.Transfer;
-           if ("StateChanged" in trans) {
-             if (trans.StateChanged.state !== "Closed") {
-               setTransferStatus(`State: ${trans.StateChanged.state}`);
-             }
+            if ("StateChanged" in trans) {
+              if (trans.StateChanged.state !== "Closed") {
+                setTransferStatus(trans.StateChanged.state === "Connected" ? "Connected to device..." : trans.StateChanged.state);
+              }
            } else if ("Started" in trans) {
              setTransferStatus(`Sending ${trans.Started.file_name}...`);
              setProgress({ transferred: 0, total: trans.Started.total_bytes });
@@ -62,13 +63,34 @@ const SendPage: React.FC = () => {
            }
         }
       });
+
+      const unlistenDrop = await listen<{ paths: string[] }>('tauri://drag-drop', (event) => {
+        if (event.payload.paths.length > 0) {
+          setSelectedPath(event.payload.paths[0]);
+          setSelectionType("file");
+        }
+        setIsDragging(false);
+      });
+
+      const unlistenDragEnter = await listen('tauri://drag-enter', () => setIsDragging(true));
+      const unlistenDragLeave = await listen('tauri://drag-leave', () => setIsDragging(false));
+
+      return () => {
+        if (unlisten) unlisten();
+        unlistenDrop();
+        unlistenDragEnter();
+        unlistenDragLeave();
+      };
     };
 
-    setupListener();
+    let cleanupFn: (() => void) | undefined;
+    setupListener().then(cleanup => {
+      cleanupFn = cleanup;
+    });
     startDiscovery();
 
     return () => {
-      if (unlisten) unlisten();
+      if (cleanupFn) cleanupFn();
     };
   }, []);
 
@@ -130,7 +152,22 @@ const SendPage: React.FC = () => {
     setSelectedPath("Clipboard Content selected");
   };
   return (
-    <div>
+    <div style={{ position: "relative", height: "100%" }}>
+      {isDragging && (
+        <div style={{
+          position: "absolute",
+          top: 0, left: 0, right: 0, bottom: 0,
+          backgroundColor: "rgba(0, 0, 0, 0.7)",
+          zIndex: 100,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          borderRadius: "12px",
+          border: "2px dashed var(--accent-primary)"
+        }}>
+          <h2 style={{ color: "var(--accent-primary)" }}>Drop file here to send</h2>
+        </div>
+      )}
       <div className="card-section">
         <h2 className="section-title">Selection</h2>
         <div className="card-grid">
@@ -175,7 +212,7 @@ const SendPage: React.FC = () => {
         </div>
         {peers.length === 0 && !isDiscovering && (
            <div style={{ padding: "24px", textAlign: "center", color: "var(--text-secondary)", fontSize: "14px" }}>
-             No nearby devices found. Make sure the receiver is open on the other device.
+             Ready to send files. Make sure the receiver is open on the other device.
            </div>
         )}
         

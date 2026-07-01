@@ -382,7 +382,9 @@ impl PlenumCore {
             }
         }
 
-        transport.close()?;
+        // Tolerant close: the sender may have already disconnected, so
+        // closing an already-severed TCP stream is expected and not fatal.
+        let _ = transport.close();
         let summary = crate::app::types::TransferSummary {
             direction: TransferDirection::Receive,
             file_name,

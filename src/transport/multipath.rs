@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use crate::transport::{Transport, TransportResult, TransportError};
+use crate::transport::{Transport, TransportResult};
 
 pub struct MultipathTransport {
     local_path: Box<dyn Transport + Send + Sync>,
@@ -9,6 +9,7 @@ pub struct MultipathTransport {
     local_active: bool,
     
     // Weighted scheduling (e.g., 95% local, 5% relay)
+    // Defaults to 100% local until a real relay transport is wired in.
     local_weight: f64,
     control_weight: f64,
     
@@ -31,8 +32,10 @@ impl MultipathTransport {
             local_path,
             control_path,
             local_active: true,
-            local_weight: 0.95,
-            control_weight: 0.05,
+            // Route 100% through local until a real relay transport is connected.
+            // When a real control path is available, call set_weights(0.95, 0.05).
+            local_weight: 1.0,
+            control_weight: 0.0,
             chunks_sent_local: 0,
             chunks_sent_control: 0,
             last_local_recv: None,
@@ -41,6 +44,13 @@ impl MultipathTransport {
             control_inter_arrival_avg: Duration::from_millis(0),
             closed: false,
         }
+    }
+
+    /// Activate multipath scheduling with custom weights once a real relay
+    /// transport is available.
+    pub fn set_weights(&mut self, local: f64, control: f64) {
+        self.local_weight = local;
+        self.control_weight = control;
     }
     
     fn update_metrics(&mut self, is_local: bool) {
@@ -119,9 +129,16 @@ impl Transport for MultipathTransport {
                     self.update_metrics(true);
                     return Ok(Some(data));
                 },
-                Ok(None) => {}, // Try control path
-                Err(_) => {
-                    self.failover_to_control();
+                Ok(None) => {
+                    // No data available on local right now; fall through to
+                    // try control path below.
+                },
+                Err(e) => {
+                    // Propagate the error so callers (e.g., engine receive loop)
+                    // can detect a closed connection and break cleanly, instead
+                    // of silently failing over to a dummy control path.
+                    self.closed = true;
+                    return Err(e);
                 }
             }
         }

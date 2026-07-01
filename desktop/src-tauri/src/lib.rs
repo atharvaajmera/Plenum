@@ -19,12 +19,13 @@ fn get_username() -> String {
 #[tauri::command]
 fn get_local_ip() -> String {
     match std::net::UdpSocket::bind("0.0.0.0:0") {
-        Ok(socket) => {
-            match socket.connect("8.8.8.8:80") {
-                Ok(()) => socket.local_addr().map(|addr| addr.ip().to_string()).unwrap_or_else(|_| "127.0.0.1".to_string()),
-                Err(_) => "127.0.0.1".to_string(),
-            }
-        }
+        Ok(socket) => match socket.connect("8.8.8.8:80") {
+            Ok(()) => socket
+                .local_addr()
+                .map(|addr| addr.ip().to_string())
+                .unwrap_or_else(|_| "127.0.0.1".to_string()),
+            Err(_) => "127.0.0.1".to_string(),
+        },
         Err(_) => "127.0.0.1".to_string(),
     }
 }
@@ -32,10 +33,11 @@ fn get_local_ip() -> String {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
-            greet, 
+            greet,
             get_device_name,
             get_username,
             get_local_ip,

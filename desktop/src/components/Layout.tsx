@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { Outlet, useNavigate, useLocation } from "react-router-dom";
 import { ArrowLeft, Info } from "lucide-react";
 import "../styles/index.css";
@@ -7,6 +7,21 @@ const Layout: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const [showInfo, setShowInfo] = useState(false);
+  const infoRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (infoRef.current && !infoRef.current.contains(event.target as Node)) {
+        setShowInfo(false);
+      }
+    }
+    if (showInfo) {
+      document.addEventListener("mousedown", handleClickOutside);
+    }
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, [showInfo]);
 
   return (
     <div className="app-layout">
@@ -28,7 +43,7 @@ const Layout: React.FC = () => {
           <span className="nav-title">Plenum</span>
         </div>
         
-        <div style={{ position: "relative" }}>
+        <div style={{ position: "relative" }} ref={infoRef}>
           <button className="icon-button" title="Info" onClick={() => setShowInfo(!showInfo)}>
             <Info size={20} />
           </button>

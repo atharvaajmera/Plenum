@@ -7,7 +7,7 @@ const ReceivePage: React.FC = () => {
   const [deviceName, setDeviceName] = useState<string>("Loading...");
   const [localIp, setLocalIp] = useState<string>("");
   const [username, setUsername] = useState<string>("");
-  const [status, setStatus] = useState<string>("Discoverable. Waiting for connections...");
+  const [status, setStatus] = useState<string>("Ready to receive files");
   const [progress, setProgress] = useState<{ transferred: number, total: number } | null>(null);
 
   useEffect(() => {
@@ -28,10 +28,16 @@ const ReceivePage: React.FC = () => {
            }
         } else if ("Transfer" in payload) {
            const trans = payload.Transfer;
-           if ("StateChanged" in trans) {
-             if (trans.StateChanged.state !== "Closed") {
-               setStatus(`Connection state: ${trans.StateChanged.state}`);
-             }
+            if ("StateChanged" in trans) {
+              if (trans.StateChanged.state !== "Closed") {
+                if (trans.StateChanged.state === "Listening") {
+                  setStatus("Ready to receive files");
+                } else if (trans.StateChanged.state === "Connected") {
+                  setStatus("Connected to device...");
+                } else {
+                  setStatus(trans.StateChanged.state);
+                }
+              }
            } else if ("Started" in trans) {
              setStatus(`Receiving ${trans.Started.file_name}...`);
              setProgress({ transferred: 0, total: trans.Started.total_bytes });

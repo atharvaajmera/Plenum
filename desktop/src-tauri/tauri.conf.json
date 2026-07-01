@@ -21,6 +21,14 @@
       "csp": null
     }
   },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/atharvaajmera/Plenum/releases/latest/download/updater.json"
+      ],
+      "pubkey": "UPDATE_PUBKEY_LATER"
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",
