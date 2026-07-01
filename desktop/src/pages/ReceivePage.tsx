@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
+import { Copy, Check } from "lucide-react";
 import { PlenumEvent, ReceiveRequest, TransferSummary } from "../types/rust";
+import { useSettings } from "../context/SettingsContext";
 
 const ReceivePage: React.FC = () => {
   const [deviceName, setDeviceName] = useState<string>("Loading...");
@@ -9,6 +11,17 @@ const ReceivePage: React.FC = () => {
   const [username, setUsername] = useState<string>("");
   const [status, setStatus] = useState<string>("Ready to receive files");
   const [progress, setProgress] = useState<{ transferred: number, total: number } | null>(null);
+  const [pin, setPin] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const { settings } = useSettings();
+
+  const handleCopyPin = () => {
+    if (pin) {
+      navigator.clipboard.writeText(pin);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  };
 
   useEffect(() => {
     invoke<string>("get_device_name").then(setDeviceName).catch(console.error);
@@ -25,6 +38,9 @@ const ReceivePage: React.FC = () => {
            const disc = payload.Discovery;
            if (typeof disc === "object" && "BroadcastStarted" in disc) {
              console.log("Broadcast started on port:", disc.BroadcastStarted.port);
+             if (settings.receive.requirePin) {
+               setPin(disc.BroadcastStarted.token);
+             }
            }
         } else if ("Transfer" in payload) {
            const trans = payload.Transfer;
@@ -89,6 +105,18 @@ const ReceivePage: React.FC = () => {
         <div style={{ marginTop: "20px", fontSize: "14px", color: "var(--text-secondary)", textAlign: "center" }}>
           {status}
         </div>
+        
+        {pin && (
+          <div style={{ marginTop: "16px", padding: "12px 24px", backgroundColor: "var(--bg-card)", borderRadius: "8px", border: "1px dashed var(--accent-primary)", display: "flex", flexDirection: "column", alignItems: "center" }}>
+            <div style={{ fontSize: "12px", color: "var(--text-secondary)", textAlign: "center", marginBottom: "4px" }}>PIN Required</div>
+            <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+              <div style={{ fontSize: "24px", fontWeight: "bold", color: "var(--accent-primary)", letterSpacing: "4px" }}>{pin}</div>
+              <div onClick={handleCopyPin} style={{ cursor: "pointer", padding: "4px", backgroundColor: "var(--bg-sidebar)", borderRadius: "4px" }}>
+                {copied ? <Check size={16} color="var(--accent-primary)" /> : <Copy size={16} color="var(--text-secondary)" />}
+              </div>
+            </div>
+          </div>
+        )}
         
         {progress && (
           <div style={{ marginTop: "16px", width: "80%", maxWidth: "300px" }}>

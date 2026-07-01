@@ -13,6 +13,8 @@ const SendPage: React.FC = () => {
   const [transferStatus, setTransferStatus] = useState<string>("");
   const [progress, setProgress] = useState<{ transferred: number, total: number } | null>(null);
   const [isDragging, setIsDragging] = useState(false);
+  const [pinInputPeer, setPinInputPeer] = useState<DiscoverySummary | null>(null);
+  const [pinInput, setPinInput] = useState("");
 
   const startDiscovery = async () => {
     setIsDiscovering(true);
@@ -94,16 +96,32 @@ const SendPage: React.FC = () => {
     };
   }, []);
 
-  const handlePeerClick = async (peer: DiscoverySummary) => {
+  const handlePeerClick = (peer: DiscoverySummary) => {
     if (!selectedPath) {
-       alert("Please select a file or folder to send first.");
-       return;
+      setTransferStatus("Please select a file or folder first");
+      return;
     }
+    setPinInputPeer(peer);
+    setPinInput("");
+  };
+
+  const handlePinSubmit = async () => {
+    if (!pinInputPeer) return;
     
-    setTransferStatus(`Connecting to ${peer.hostname}...`);
+    if (pinInput.trim() !== "") {
+      if (pinInput.trim().toUpperCase() !== pinInputPeer.token.toUpperCase()) {
+        setTransferStatus("Error: Incorrect PIN entered.");
+        return;
+      }
+    }
+
+    setTransferStatus("Connecting to device...");
+    const peer = pinInputPeer;
+    setPinInputPeer(null);
+    
     try {
       const req: SendRequest = {
-        file_path: selectedPath,
+        file_path: selectedPath!,
         address: peer.address,
         discovery_token: peer.token,
         permissions: { local_network: true, file_system_read: true, file_system_write: true, background_transfer: false },
@@ -205,9 +223,6 @@ const SendPage: React.FC = () => {
               style={{ cursor: "pointer", opacity: isDiscovering ? 0.5 : 1 }} 
               onClick={startDiscovery} 
             />
-            <Monitor size={16} style={{ cursor: "pointer", color: "var(--text-secondary)" }} />
-            <Heart size={16} style={{ cursor: "pointer", color: "var(--text-secondary)" }} />
-            <Settings size={16} style={{ cursor: "pointer", color: "var(--text-secondary)" }} />
           </div>
         </div>
         {peers.length === 0 && !isDiscovering && (
@@ -223,26 +238,50 @@ const SendPage: React.FC = () => {
         )}
 
         {peers.map((peer, i) => (
-          <div key={i} onClick={() => handlePeerClick(peer)} style={{ 
-            backgroundColor: "var(--bg-card)", 
-            padding: "24px", 
-            borderRadius: "12px", 
-            display: "flex", 
-            alignItems: "center", 
-            gap: "16px",
-            marginTop: "16px",
-            cursor: "pointer",
-            border: "1px solid transparent",
-            transition: "all 0.2s ease"
-          }}
-          onMouseEnter={(e) => e.currentTarget.style.borderColor = "var(--accent-primary)"}
-          onMouseLeave={(e) => e.currentTarget.style.borderColor = "transparent"}
-          >
-            <Monitor size={40} color="var(--accent-primary)" />
-            <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
-              <div style={{ fontWeight: 600, color: "var(--text-primary)" }}>{peer.hostname}</div>
-              <div style={{ fontSize: "12px", color: "var(--text-secondary)" }}>{peer.address}</div>
+          <div key={i} style={{ marginTop: "16px" }}>
+            <div onClick={() => handlePeerClick(peer)} style={{ 
+              backgroundColor: "var(--bg-card)", 
+              padding: "24px", 
+              borderRadius: pinInputPeer?.address === peer.address ? "12px 12px 0 0" : "12px", 
+              display: "flex", 
+              alignItems: "center", 
+              gap: "16px",
+              cursor: "pointer",
+              border: "1px solid transparent",
+              borderBottom: pinInputPeer?.address === peer.address ? "1px solid var(--border-color)" : "1px solid transparent",
+              transition: "all 0.2s ease"
+            }}
+            onMouseEnter={(e) => e.currentTarget.style.borderColor = "var(--accent-primary)"}
+            onMouseLeave={(e) => { if (pinInputPeer?.address !== peer.address) e.currentTarget.style.borderColor = "transparent"; }}
+            >
+              <Monitor size={40} color="var(--accent-primary)" />
+              <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                <div style={{ fontWeight: 600, color: "var(--text-primary)" }}>{peer.hostname}</div>
+                <div style={{ fontSize: "12px", color: "var(--text-secondary)" }}>{peer.address}</div>
+              </div>
             </div>
+            
+            {pinInputPeer?.address === peer.address && (
+              <div style={{ backgroundColor: "var(--bg-card)", padding: "16px 24px", borderRadius: "0 0 12px 12px", display: "flex", flexDirection: "column", gap: "12px" }}>
+                <div style={{ fontSize: "13px", color: "var(--text-secondary)" }}>
+                  Enter PIN if required, otherwise leave blank:
+                </div>
+                <div style={{ display: "flex", gap: "12px" }}>
+                  <input 
+                    type="text" 
+                    value={pinInput} 
+                    onChange={(e) => setPinInput(e.target.value)} 
+                    placeholder="PIN" 
+                    maxLength={6}
+                    style={{ flex: 1, padding: "10px 12px", borderRadius: "8px", border: "1px solid var(--border-color)", backgroundColor: "var(--bg-sidebar)", color: "var(--text-primary)", outline: "none", fontSize: "14px", letterSpacing: "2px", textTransform: "uppercase" }}
+                    onKeyDown={(e) => { if (e.key === "Enter") handlePinSubmit(); }}
+                  />
+                  <button onClick={handlePinSubmit} style={{ padding: "10px 20px", borderRadius: "8px", border: "none", backgroundColor: "var(--accent-primary)", color: "white", fontWeight: 600, cursor: "pointer" }}>
+                    Connect
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         ))}
 
