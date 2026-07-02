@@ -3,7 +3,7 @@ name = "plenum"
 version = "0.1.0"
 edition = "2024"
 [workspace]
-members = ["desktop/src-tauri"]
+members = ["desktop/src-tauri", "mobile/rust"]
 
 [dependencies]
 base64 = "0.22"
