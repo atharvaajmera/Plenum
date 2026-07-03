@@ -5,6 +5,7 @@ import 'package:mobile/src/rust/frb_generated.dart';
 import 'screens/send_screen.dart';
 import 'screens/receive_screen.dart';
 import 'screens/settings_screen.dart';
+import 'theme.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -20,13 +21,7 @@ class PlenumApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Plenum',
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: Colors.deepPurple,
-          brightness: Brightness.dark,
-        ),
-        useMaterial3: true,
-      ),
+      theme: AppTheme.darkTheme,
       home: const MainScreen(),
     );
   }
