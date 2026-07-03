@@ -12,7 +12,7 @@ pub fn chunk_bytes(bytes: &[u8], chunk_size: usize) -> Result<Vec<Packet>, Strea
     }
 
     let chunk_count = bytes.chunks(chunk_size).count();
-    if chunk_count > u32::MAX as usize + 1 {
+    if chunk_count.saturating_sub(1) > u32::MAX as usize {
         return Err(StreamError::TooManyChunks {
             chunks: chunk_count,
         });
