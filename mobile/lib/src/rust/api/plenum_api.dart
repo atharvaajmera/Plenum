@@ -16,9 +16,11 @@ Stream<String> startDiscovery({required BigInt timeoutSecs}) => RustLib
 Stream<String> startSend({
   required String filePath,
   required String peerAddress,
+  String? optionalPin,
 }) => RustLib.instance.api.crateApiPlenumApiStartSend(
   filePath: filePath,
   peerAddress: peerAddress,
+  optionalPin: optionalPin,
 );
 
 Stream<String> startReceive({

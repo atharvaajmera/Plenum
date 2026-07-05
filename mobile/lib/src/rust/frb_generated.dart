@@ -89,6 +89,7 @@ abstract class RustLibApi extends BaseApi {
   Stream<String> crateApiPlenumApiStartSend({
     required String filePath,
     required String peerAddress,
+    String? optionalPin,
   });
 }
 
@@ -206,6 +207,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   Stream<String> crateApiPlenumApiStartSend({
     required String filePath,
     required String peerAddress,
+    String? optionalPin,
   }) {
     final sink = RustStreamSink<String>();
     unawaited(
@@ -216,6 +218,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             sse_encode_StreamSink_String_Sse(sink, serializer);
             sse_encode_String(filePath, serializer);
             sse_encode_String(peerAddress, serializer);
+            sse_encode_opt_String(optionalPin, serializer);
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
@@ -228,7 +231,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             decodeErrorData: sse_decode_AnyhowException,
           ),
           constMeta: kCrateApiPlenumApiStartSendConstMeta,
-          argValues: [sink, filePath, peerAddress],
+          argValues: [sink, filePath, peerAddress, optionalPin],
           apiImpl: this,
         ),
       ),
@@ -238,7 +241,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   TaskConstMeta get kCrateApiPlenumApiStartSendConstMeta => const TaskConstMeta(
     debugName: "start_send",
-    argNames: ["sink", "filePath", "peerAddress"],
+    argNames: ["sink", "filePath", "peerAddress", "optionalPin"],
   );
 
   @protected
@@ -269,6 +272,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as Uint8List;
+  }
+
+  @protected
+  String? dco_decode_opt_String(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_String(raw);
   }
 
   @protected
@@ -328,6 +337,17 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var len_ = sse_decode_i_32(deserializer);
     return deserializer.buffer.getUint8List(len_);
+  }
+
+  @protected
+  String? sse_decode_opt_String(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_String(deserializer));
+    } else {
+      return null;
+    }
   }
 
   @protected
@@ -405,6 +425,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.length, serializer);
     serializer.buffer.putUint8List(self);
+  }
+
+  @protected
+  void sse_encode_opt_String(String? self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_String(self, serializer);
+    }
   }
 
   @protected

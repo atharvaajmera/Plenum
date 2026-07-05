@@ -35,11 +35,12 @@ pub fn start_send(
     sink: StreamSink<String>,
     file_path: String,
     peer_address: String,
+    optional_pin: Option<String>,
 ) -> anyhow::Result<String> {
     let req = SendRequest {
         file_path: PathBuf::from(file_path),
         address: Some(peer_address),
-        discovery_token: None,
+        discovery_token: optional_pin,
         permissions: CorePermissions::mobile_defaults(),
         options: TransferOptions::default(),
     };

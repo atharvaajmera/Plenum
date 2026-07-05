@@ -59,10 +59,10 @@ class _SendScreenState extends State<SendScreen> {
     }
   }
 
-  void _sendToPeer(String address) {
+  void _sendToPeer(String address, String? pin) {
     if (_selectedFile == null) return;
     
-    startSend(filePath: _selectedFile!, peerAddress: address).listen((eventJson) {
+    startSend(filePath: _selectedFile!, peerAddress: address, optionalPin: pin).listen((eventJson) {
       final event = jsonDecode(eventJson);
       if (event['Transfer'] != null) {
         final trans = event['Transfer'];
@@ -87,6 +87,121 @@ class _SendScreenState extends State<SendScreen> {
         }
       }
     });
+  }
+
+  void _showPinDialog(String address, String hostname) {
+    if (_selectedFile == null) return;
+    
+    final TextEditingController pinController = TextEditingController();
+    
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          backgroundColor: AppTheme.bgCard,
+          title: Text('Send to $hostname', style: const TextStyle(color: AppTheme.textPrimary)),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text('If the receiver requires a PIN, enter it below. Otherwise, leave blank.', style: TextStyle(color: AppTheme.textSecondary, fontSize: 14)),
+              const SizedBox(height: 16),
+              TextField(
+                controller: pinController,
+                decoration: const InputDecoration(
+                  labelText: 'PIN (Optional)',
+                  border: OutlineInputBorder(),
+                  focusedBorder: OutlineInputBorder(borderSide: BorderSide(color: AppTheme.accentPrimary)),
+                ),
+                style: const TextStyle(color: AppTheme.textPrimary),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel', style: TextStyle(color: AppTheme.textSecondary)),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.pop(context);
+                final pin = pinController.text.trim();
+                _sendToPeer(address, pin.isNotEmpty ? pin : null);
+              },
+              style: ElevatedButton.styleFrom(backgroundColor: AppTheme.accentPrimary),
+              child: const Text('Send'),
+            ),
+          ],
+        );
+      }
+    );
+  }
+
+  void _showManualIpDialog() {
+    final TextEditingController ipController = TextEditingController();
+    final TextEditingController portController = TextEditingController(text: '8080');
+
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          backgroundColor: AppTheme.bgCard,
+          title: const Text('Connect by IP', style: TextStyle(color: AppTheme.textPrimary)),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                'Enter the IP address shown on the receiver\'s screen.',
+                style: TextStyle(color: AppTheme.textSecondary, fontSize: 13),
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: ipController,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                  labelText: 'IP Address',
+                  hintText: '192.168.1.5',
+                  border: OutlineInputBorder(),
+                  focusedBorder: OutlineInputBorder(borderSide: BorderSide(color: AppTheme.accentPrimary)),
+                ),
+                style: const TextStyle(color: AppTheme.textPrimary),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: portController,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                  labelText: 'Port',
+                  border: OutlineInputBorder(),
+                  focusedBorder: OutlineInputBorder(borderSide: BorderSide(color: AppTheme.accentPrimary)),
+                ),
+                style: const TextStyle(color: AppTheme.textPrimary),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel', style: TextStyle(color: AppTheme.textSecondary)),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.pop(context);
+                final ip = ipController.text.trim();
+                final port = portController.text.trim();
+                if (ip.isNotEmpty) {
+                  final address = '$ip:$port';
+                  setState(() {
+                    _peers.add({'hostname': ip, 'address': address, 'token': 'manual'});
+                  });
+                }
+              },
+              style: ElevatedButton.styleFrom(backgroundColor: AppTheme.accentPrimary),
+              child: const Text('Add'),
+            ),
+          ],
+        );
+      },
+    );
   }
 
   @override
@@ -145,13 +260,36 @@ class _SendScreenState extends State<SendScreen> {
             ),
             
             const SizedBox(height: 32),
-            const Text('Discovered Devices', style: TextStyle(fontWeight: FontWeight.w600, color: AppTheme.textPrimary, fontSize: 14)),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text('Discovered Devices', style: TextStyle(fontWeight: FontWeight.w600, color: AppTheme.textPrimary, fontSize: 14)),
+                GestureDetector(
+                  onTap: _showManualIpDialog,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    decoration: BoxDecoration(
+                      border: Border.all(color: AppTheme.accentPrimary),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: const Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.add, size: 16, color: AppTheme.accentPrimary),
+                        SizedBox(width: 4),
+                        Text('Manual IP', style: TextStyle(color: AppTheme.accentPrimary, fontSize: 12, fontWeight: FontWeight.w600)),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
             const SizedBox(height: 16),
             
             if (_peers.isEmpty && !_isDiscovering)
               const Center(child: Padding(
                 padding: EdgeInsets.all(32.0),
-                child: Text('No devices found on local network.', style: TextStyle(color: AppTheme.textSecondary)),
+                child: Text('No devices found.\nTry "Manual IP" to connect directly.', textAlign: TextAlign.center, style: TextStyle(color: AppTheme.textSecondary)),
               )),
               
             Expanded(
@@ -180,7 +318,7 @@ class _SendScreenState extends State<SendScreen> {
                       subtitle: Text(peer['address'] ?? '', style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
                       trailing: IconButton(
                         icon: const Icon(Icons.send_rounded, color: AppTheme.accentPrimary),
-                        onPressed: _selectedFile == null ? null : () => _sendToPeer(peer['address']),
+                        onPressed: _selectedFile == null ? null : () => _showPinDialog(peer['address'], peer['hostname'] ?? 'Unknown Device'),
                       ),
                     ),
                   );
