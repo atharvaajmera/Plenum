@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
+import { downloadDir } from "@tauri-apps/api/path";
 import { Copy, Check } from "lucide-react";
 import { PlenumEvent, ReceiveRequest, TransferSummary } from "../types/rust";
 import { useSettings } from "../context/SettingsContext";
@@ -66,10 +67,12 @@ const ReceivePage: React.FC = () => {
         }
       });
 
-      // 2. Invoke command to start receiving and advertising
+      // 2. Resolve the real system Downloads directory
+      const downloadsPath = await downloadDir();
+
       const req: ReceiveRequest = {
-        port: 0, // auto-assign
-        output_dir: "Downloads", // Rust backend might need to resolve this to actual Downloads dir
+        port: 0, // auto-assign; firewall allows the whole exe
+        output_dir: downloadsPath,
         announce_on_lan: true,
         permissions: { local_network: true, file_system_read: true, file_system_write: true, background_transfer: false },
         options: { chunk_size: 32768, window_size: 128, timeout_ticks: 1000 }
