@@ -3,8 +3,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:mobile/src/rust/api/plenum_api.dart';
+import '../services/internet_settings.dart';
 import '../theme.dart';
 import '../widgets/animated_radar.dart';
+
+enum _TransferMode { local, internet }
 
 class ReceiveScreen extends StatefulWidget {
   const ReceiveScreen({super.key});
@@ -14,11 +17,17 @@ class ReceiveScreen extends StatefulWidget {
 }
 
 class _ReceiveScreenState extends State<ReceiveScreen> {
+  _TransferMode _mode = _TransferMode.local;
+
   bool _isListening = false;
   String _statusMessage = 'Tap radar to start receiving';
   String? _pin;
   double? _progress;
   bool _copied = false;
+
+  String? _roomCode;
+  bool _roomCodeCopied = false;
+  bool _remoteStarted = false;
 
   void _startReceiving() async {
     final dir = await getApplicationDocumentsDirectory();
@@ -29,7 +38,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
 
     startReceive(outputDir: dir.path, port: 8080, announce: true).listen((eventJson) {
       final event = jsonDecode(eventJson);
-      
+
       if (event['Discovery'] != null) {
         final discEvent = event['Discovery'];
         if (discEvent['BroadcastStarted'] != null) {
@@ -63,6 +72,73 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     });
   }
 
+  Future<void> _setupRemoteReceiver() async {
+    if (_remoteStarted) return;
+    _remoteStarted = true;
+
+    setState(() {
+      _statusMessage = 'Generating room code...';
+      _roomCode = null;
+      _progress = null;
+    });
+
+    final code = generateRoomCodeSync();
+    final myPeerId = generatePeerIdSync();
+
+    if (!mounted) return;
+    setState(() => _roomCode = code);
+
+    final relayServerUrl = await InternetSettings.loadRelayServerUrl();
+    if (relayServerUrl.isEmpty) {
+      if (mounted) setState(() => _statusMessage = 'Set a Relay Server URL in Settings first');
+      return;
+    }
+    final iceServers = await InternetSettings.loadIceServers();
+
+    if (mounted) setState(() => _statusMessage = 'Waiting for sender...');
+
+    final dir = await getApplicationDocumentsDirectory();
+
+    startReceiveRemote(
+      outputDir: dir.path,
+      relayServerUrl: relayServerUrl,
+      sessionId: code,
+      myPeerId: myPeerId,
+      iceServersJson: InternetSettings.encodeIceServersForFfi(iceServers),
+      connectTimeoutSecs: BigInt.from(30),
+    ).listen((eventJson) {
+      final event = jsonDecode(eventJson);
+      if (event['Transfer'] != null) {
+        final trans = event['Transfer'];
+        if (trans['StateChanged'] != null) {
+          if (trans['StateChanged']['state'] != 'Closed') {
+            setState(() {
+              _statusMessage = trans['StateChanged']['state'] == 'Connected'
+                  ? 'Connected to device...'
+                  : trans['StateChanged']['state'];
+            });
+          }
+        } else if (trans['Started'] != null) {
+          setState(() {
+            _statusMessage = 'Receiving ${trans['Started']['file_name']}...';
+            _progress = 0.0;
+          });
+        } else if (trans['Progress'] != null) {
+          setState(() {
+            _progress = trans['Progress']['transferred_bytes'] / trans['Progress']['total_bytes'];
+          });
+        } else if (trans['Completed'] != null) {
+          setState(() {
+            _statusMessage = 'Received successfully!';
+            _progress = 1.0;
+          });
+        }
+      }
+    }, onError: (e) {
+      if (mounted) setState(() => _statusMessage = 'Error: $e');
+    });
+  }
+
   void _copyPin() {
     if (_pin != null) {
       Clipboard.setData(ClipboardData(text: _pin!));
@@ -70,6 +146,29 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
       Future.delayed(const Duration(seconds: 2), () {
         if (mounted) setState(() => _copied = false);
       });
+    }
+  }
+
+  void _copyRoomCode() {
+    if (_roomCode != null) {
+      Clipboard.setData(ClipboardData(text: _roomCode!));
+      setState(() => _roomCodeCopied = true);
+      Future.delayed(const Duration(seconds: 2), () {
+        if (mounted) setState(() => _roomCodeCopied = false);
+      });
+    }
+  }
+
+  void _switchMode(_TransferMode mode) {
+    setState(() {
+      _mode = mode;
+      _statusMessage = mode == _TransferMode.local
+          ? 'Tap radar to start receiving'
+          : 'Preparing...';
+    });
+    if (mode == _TransferMode.internet) {
+      _remoteStarted = false;
+      _setupRemoteReceiver();
     }
   }
 
@@ -81,18 +180,42 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            GestureDetector(
-              onTap: _isListening ? null : _startReceiving,
-              child: AnimatedRadar(isListening: _isListening),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                _ModeChip(
+                  icon: Icons.wifi,
+                  label: 'Local Network',
+                  selected: _mode == _TransferMode.local,
+                  onTap: () => _switchMode(_TransferMode.local),
+                ),
+                const SizedBox(width: 12),
+                _ModeChip(
+                  icon: Icons.public,
+                  label: 'Internet',
+                  selected: _mode == _TransferMode.internet,
+                  onTap: () => _switchMode(_TransferMode.internet),
+                ),
+              ],
             ),
+            const SizedBox(height: 32),
+
+            if (_mode == _TransferMode.local)
+              GestureDetector(
+                onTap: _isListening ? null : _startReceiving,
+                child: AnimatedRadar(isListening: _isListening),
+              )
+            else
+              const Icon(Icons.public, size: 96, color: AppTheme.accentPrimary),
+
             const SizedBox(height: 40),
             Text(
-              _statusMessage, 
+              _statusMessage,
               style: const TextStyle(fontSize: 16, color: AppTheme.textSecondary),
               textAlign: TextAlign.center,
             ),
-            
-            if (_pin != null)
+
+            if (_mode == _TransferMode.local && _pin != null)
               Container(
                 margin: const EdgeInsets.only(top: 24),
                 padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
@@ -110,10 +233,10 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Text(
-                          _pin!, 
+                          _pin!,
                           style: const TextStyle(
-                            fontSize: 28, 
-                            fontWeight: FontWeight.bold, 
+                            fontSize: 28,
+                            fontWeight: FontWeight.bold,
                             letterSpacing: 6,
                             color: AppTheme.accentPrimary
                           )
@@ -140,6 +263,54 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                 ),
               ),
 
+            if (_mode == _TransferMode.internet && _roomCode != null)
+              Container(
+                margin: const EdgeInsets.only(top: 24),
+                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+                decoration: BoxDecoration(
+                  color: AppTheme.bgCard,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: AppTheme.accentPrimary, width: 1),
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text('Room Code', style: TextStyle(fontSize: 12, color: AppTheme.textSecondary)),
+                    const SizedBox(height: 8),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          _roomCode!,
+                          style: const TextStyle(
+                            fontSize: 28,
+                            fontWeight: FontWeight.bold,
+                            letterSpacing: 6,
+                            color: AppTheme.accentPrimary
+                          )
+                        ),
+                        const SizedBox(width: 16),
+                        GestureDetector(
+                          onTap: _copyRoomCode,
+                          child: Container(
+                            padding: const EdgeInsets.all(8),
+                            decoration: BoxDecoration(
+                              color: AppTheme.bgSidebar,
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Icon(
+                              _roomCodeCopied ? Icons.check : Icons.copy,
+                              size: 20,
+                              color: _roomCodeCopied ? AppTheme.accentPrimary : AppTheme.textSecondary,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+
             if (_progress != null)
               Padding(
                 padding: const EdgeInsets.all(32.0),
@@ -153,6 +324,38 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                   ),
                 ),
               ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ModeChip extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _ModeChip({required this.icon, required this.label, required this.selected, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+        decoration: BoxDecoration(
+          color: AppTheme.bgCard,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: selected ? AppTheme.accentPrimary : AppTheme.borderColor, width: selected ? 2 : 1),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 16, color: selected ? AppTheme.accentPrimary : AppTheme.textSecondary),
+            const SizedBox(width: 6),
+            Text(label, style: TextStyle(color: selected ? AppTheme.accentPrimary : AppTheme.textSecondary, fontWeight: FontWeight.w600, fontSize: 12)),
           ],
         ),
       ),

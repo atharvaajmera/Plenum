@@ -32,3 +32,57 @@ Stream<String> startReceive({
   port: port,
   announce: announce,
 );
+
+/// Sends a file over the internet via a relay/signaling server, negotiating a
+/// WebRTC data channel. Mirrors `start_send`, but for internet (non-LAN) transfers.
+///
+/// `ice_servers_json` is a JSON-encoded array of `{ urls: string[], username?:
+/// string, credential?: string }`, matching `plenum::signaling::IceServer`.
+/// Passed as JSON (rather than a plain FFI struct) because `IceServer` is
+/// defined in the `plenum` crate, so flutter_rust_bridge would otherwise
+/// generate it as an opaque handle Dart cannot construct field-by-field.
+Stream<String> startSendRemote({
+  required String filePath,
+  required String relayServerUrl,
+  required String sessionId,
+  required String myPeerId,
+  required String iceServersJson,
+  required BigInt connectTimeoutSecs,
+}) => RustLib.instance.api.crateApiPlenumApiStartSendRemote(
+  filePath: filePath,
+  relayServerUrl: relayServerUrl,
+  sessionId: sessionId,
+  myPeerId: myPeerId,
+  iceServersJson: iceServersJson,
+  connectTimeoutSecs: connectTimeoutSecs,
+);
+
+/// Receives a file over the internet via a relay/signaling server, negotiating
+/// a WebRTC data channel. Mirrors `start_receive`, but for internet (non-LAN) transfers.
+///
+/// See [`start_send_remote`] for the `ice_servers_json` shape/rationale.
+Stream<String> startReceiveRemote({
+  required String outputDir,
+  required String relayServerUrl,
+  required String sessionId,
+  required String myPeerId,
+  required String iceServersJson,
+  required BigInt connectTimeoutSecs,
+}) => RustLib.instance.api.crateApiPlenumApiStartReceiveRemote(
+  outputDir: outputDir,
+  relayServerUrl: relayServerUrl,
+  sessionId: sessionId,
+  myPeerId: myPeerId,
+  iceServersJson: iceServersJson,
+  connectTimeoutSecs: connectTimeoutSecs,
+);
+
+/// Generates a display-ready room code for internet transfers, without
+/// blocking on a relay-server connection (so the receive UI can show it
+/// immediately).
+String generateRoomCodeSync() =>
+    RustLib.instance.api.crateApiPlenumApiGenerateRoomCodeSync();
+
+/// Generates a random per-connection peer id for internet transfers.
+String generatePeerIdSync() =>
+    RustLib.instance.api.crateApiPlenumApiGeneratePeerIdSync();
