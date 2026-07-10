@@ -1,0 +1,12 @@
+target/
+.git/
+.claude/
+.agent/
+node_modules/
+desktop/dist/
+desktop/src-tauri/target/
+mobile/rust/target/
+mobile/build/
+*.profraw
+*.profdata
+*.lcov

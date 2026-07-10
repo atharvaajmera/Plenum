@@ -1,0 +1,14 @@
+{
+	# Automatic HTTPS via Let's Encrypt (Caddy default). Set CADDY_DOMAIN in
+	# your .env before `docker compose up`.
+	email admin@{$CADDY_DOMAIN}
+}
+
+{$CADDY_DOMAIN} {
+	reverse_proxy /ws relay-server:8080
+	reverse_proxy /turn-credentials relay-server:8080
+	reverse_proxy /healthz relay-server:8080
+
+	# Anything else on this domain is not part of the relay API surface.
+	respond 404
+}

@@ -1,0 +1,54 @@
+services:
+  relay-server:
+    build:
+      context: .
+      dockerfile: relay-server/Dockerfile
+    restart: unless-stopped
+    environment:
+      RELAY_BIND_ADDR: "0.0.0.0:8080"
+      RELAY_PUBLIC_URL: "wss://${CADDY_DOMAIN}/ws"
+      TURN_SHARED_SECRET: "${TURN_SHARED_SECRET}"
+      TURN_URLS: "turn:${CADDY_DOMAIN}:3478?transport=udp,turn:${CADDY_DOMAIN}:3478?transport=tcp"
+      RUST_LOG: "info"
+    depends_on:
+      - coturn
+    # Not published to the host directly; Caddy reverse-proxies to it over
+    # the internal compose network.
+    expose:
+      - "8080"
+
+  coturn:
+    image: coturn/coturn:latest
+    restart: unless-stopped
+    # Host networking is the simplest way to give coturn access to the full
+    # relay UDP port range without publishing thousands of individual ports.
+    # See relay-server/README.md for the bridge-mode fallback if your host
+    # doesn't allow network_mode: host (e.g. some managed container
+    # platforms).
+    network_mode: host
+    command:
+      - "-n"
+      - "--use-auth-secret"
+      - "--static-auth-secret=${TURN_SHARED_SECRET}"
+      - "--realm=plenum.local"
+      - "--min-port=49152"
+      - "--max-port=49452"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      CADDY_DOMAIN: "${CADDY_DOMAIN}"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - relay-server
+
+volumes:
+  caddy_data:
+  caddy_config:
