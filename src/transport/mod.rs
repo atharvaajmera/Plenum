@@ -17,4 +17,5 @@ pub trait Transport {
     fn send(&mut self, bytes: &[u8]) -> TransportResult<()>;
     fn recv(&mut self) -> TransportResult<Option<Vec<u8>>>;
     fn close(&mut self) -> TransportResult<()>;
+    fn is_closed(&self) -> bool;
 }

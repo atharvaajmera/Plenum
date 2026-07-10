@@ -7,6 +7,7 @@ pub mod app;
 pub mod discovery;
 pub mod flow;
 pub mod protocol;
+pub mod rtc;
 pub mod security;
 pub mod signaling;
 pub mod stream;

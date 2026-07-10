@@ -27,7 +27,19 @@ impl PairingToken {
 
     /// Generates a new random pairing token with a custom TTL.
     pub fn generate_with_ttl(ttl: Duration) -> Self {
-        let code = random_alphanumeric(TOKEN_LEN);
+        Self::generate_with_len_and_ttl(TOKEN_LEN, ttl)
+    }
+
+    /// Generates a new random pairing token with a custom code length and the
+    /// default TTL. Used for internet-transfer room codes, which are longer
+    /// than the default 6-character LAN pairing PIN since they double as the
+    /// actual session secret on a public relay server.
+    pub fn generate_with_len(len: usize) -> Self {
+        Self::generate_with_len_and_ttl(len, DEFAULT_TTL)
+    }
+
+    fn generate_with_len_and_ttl(len: usize, ttl: Duration) -> Self {
+        let code = random_alphanumeric(len);
         Self {
             code,
             created_at: Instant::now(),

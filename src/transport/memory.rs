@@ -169,4 +169,8 @@ impl Transport for MemoryTransport {
         self.ready.clear();
         Ok(())
     }
+
+    fn is_closed(&self) -> bool {
+        self.closed
+    }
 }

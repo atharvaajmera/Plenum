@@ -167,4 +167,8 @@ impl Transport for MultipathTransport {
         }
         Ok(())
     }
+
+    fn is_closed(&self) -> bool {
+        self.closed
+    }
 }

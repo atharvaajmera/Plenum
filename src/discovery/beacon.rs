@@ -152,6 +152,12 @@ impl Beacon {
     /// and sends periodic UDP broadcast datagrams until the returned handle
     /// is stopped or the token expires.
     ///
+    /// To handle machines with multiple network interfaces (VirtualBox, mobile
+    /// hotspot, VPN, etc.), we enumerate all IPv4 interfaces and compute each
+    /// one's subnet-directed broadcast address. The datagram is then sent to
+    /// every interface on each tick, guaranteeing that the real WiFi adapter
+    /// always gets the announcement regardless of OS routing decisions.
+    ///
     /// `tcp_port` is the port the receiver is listening on for file transfers.
     pub fn broadcast(
         &self,
@@ -171,12 +177,19 @@ impl Beacon {
         };
 
         let datagram = announcement.encode();
-        let dest = SocketAddrV4::new(Ipv4Addr::BROADCAST, self.config.broadcast_port);
+
+        // Compute all subnet-directed broadcast destinations.
+        let mut destinations = compute_broadcast_destinations(self.config.broadcast_port);
+        // Always include the limited broadcast as a fallback.
+        let limited = SocketAddrV4::new(Ipv4Addr::BROADCAST, self.config.broadcast_port);
+        if !destinations.contains(&limited) {
+            destinations.push(limited);
+        }
 
         Ok(BroadcastHandle {
             socket,
             datagram,
-            dest,
+            destinations,
             interval: self.config.broadcast_interval,
         })
     }
@@ -273,14 +286,18 @@ impl Default for Beacon {
 pub struct BroadcastHandle {
     socket: UdpSocket,
     datagram: Vec<u8>,
-    dest: SocketAddrV4,
+    destinations: Vec<SocketAddrV4>,
     interval: Duration,
 }
 
 impl BroadcastHandle {
-    /// Sends one broadcast datagram. Call this periodically from your event loop.
+    /// Sends one broadcast datagram to ALL discovered network interfaces.
     pub fn send_once(&self) -> Result<(), DiscoveryError> {
-        self.socket.send_to(&self.datagram, self.dest)?;
+        for dest in &self.destinations {
+            // Best-effort: if one interface fails (e.g. adapter disconnected),
+            // continue sending on the others.
+            let _ = self.socket.send_to(&self.datagram, dest);
+        }
         Ok(())
     }
 
@@ -308,6 +325,39 @@ impl BroadcastHandle {
 
         Ok(count)
     }
+}
+
+/// Computes the subnet-directed broadcast address for every IPv4 interface on
+/// this machine. For example, an interface with IP `192.168.1.5` and netmask
+/// `255.255.255.0` yields broadcast address `192.168.1.255`.
+fn compute_broadcast_destinations(port: u16) -> Vec<SocketAddrV4> {
+    let mut destinations = Vec::new();
+
+    if let Ok(ifaces) = if_addrs::get_if_addrs() {
+        for iface in ifaces {
+            // Skip loopback interfaces
+            if iface.is_loopback() {
+                continue;
+            }
+
+            if let if_addrs::IfAddr::V4(v4) = iface.addr {
+                let ip_octets = v4.ip.octets();
+                let mask_octets = v4.netmask.octets();
+
+                // broadcast = ip | !netmask
+                let broadcast = Ipv4Addr::new(
+                    ip_octets[0] | !mask_octets[0],
+                    ip_octets[1] | !mask_octets[1],
+                    ip_octets[2] | !mask_octets[2],
+                    ip_octets[3] | !mask_octets[3],
+                );
+
+                destinations.push(SocketAddrV4::new(broadcast, port));
+            }
+        }
+    }
+
+    destinations
 }
 
 /// Returns the hostname of the local machine, or "unknown" if it cannot be determined.

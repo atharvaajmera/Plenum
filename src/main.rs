@@ -132,6 +132,14 @@ impl plenum::app::EventSink for CliEventSink {
                             self.println(format!("Connecting to {peer}..."));
                         }
                     }
+                    ConnectionState::SignalingConnected => {
+                        if let Some(peer) = peer {
+                            self.println(format!("Connected to relay server, joining room {peer}..."));
+                        }
+                    }
+                    ConnectionState::NegotiatingIce => {
+                        self.println("Negotiating WebRTC connection...");
+                    }
                     ConnectionState::Connected => {
                         if let Some(peer) = peer {
                             self.println(format!("Connected to {peer}."));

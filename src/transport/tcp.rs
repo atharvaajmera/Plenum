@@ -130,4 +130,8 @@ impl Transport for TcpTransport {
         self.stream.shutdown(std::net::Shutdown::Both)?;
         Ok(())
     }
+
+    fn is_closed(&self) -> bool {
+        self.closed
+    }
 }

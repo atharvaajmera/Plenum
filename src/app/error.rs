@@ -6,6 +6,7 @@ use crate::app::types::PermissionKind;
 use crate::discovery::DiscoveryError;
 use crate::flow::FlowError;
 use crate::protocol::ProtocolError;
+use crate::rtc::RtcError;
 use crate::security::SecurityError;
 use crate::signaling::SignalingError;
 use crate::stream::StreamError;
@@ -21,6 +22,7 @@ pub enum AppError {
     Discovery(DiscoveryError),
     Flow(FlowError),
     Protocol(ProtocolError),
+    Rtc(RtcError),
     Security(SecurityError),
     Signaling(SignalingError),
     Stream(StreamError),
@@ -39,6 +41,7 @@ impl fmt::Display for AppError {
             Self::Discovery(error) => write!(f, "discovery error: {error}"),
             Self::Flow(error) => write!(f, "flow error: {error}"),
             Self::Protocol(error) => write!(f, "protocol error: {error}"),
+            Self::Rtc(error) => write!(f, "rtc error: {error}"),
             Self::Security(error) => write!(f, "security error: {error}"),
             Self::Signaling(error) => write!(f, "signaling error: {error}"),
             Self::Stream(error) => write!(f, "stream error: {error}"),
@@ -65,6 +68,12 @@ impl From<FlowError> for AppError {
 impl From<ProtocolError> for AppError {
     fn from(error: ProtocolError) -> Self {
         Self::Protocol(error)
+    }
+}
+
+impl From<RtcError> for AppError {
+    fn from(error: RtcError) -> Self {
+        Self::Rtc(error)
     }
 }
 

@@ -14,11 +14,13 @@ use crate::app::error::AppError;
 use crate::app::types::{
     PlenumEvent, BenchmarkEvent, BenchmarkIterationSummary, BenchmarkRequest, BenchmarkSummary,
     ConnectionState, CorePermissions, DiscoverRequest, DiscoveryEvent, DiscoverySummary, EventSink,
-    PermissionKind, ReceiveRequest, SendRequest, TransferDirection, TransferEvent,
+    PermissionKind, ReceiveRemoteRequest, ReceiveRequest, SendRemoteRequest, SendRequest,
+    TransferDirection, TransferEvent, TransferSummary,
 };
 use crate::discovery::{Beacon, PairingToken};
 use crate::flow::{ReceiverWindow, SenderWindow};
 use crate::protocol::{Packet, PacketType, encode_packet, parse_packet};
+use crate::rtc::RtcTransport;
 use crate::signaling::{RoutedSignal, SignalMessage, SignalingState};
 use crate::stream::{ResumeCheckpoint, chunk_bytes};
 use crate::transport::{MemoryTransport, MemoryTransportConfig, TcpTransport, Transport};
@@ -92,104 +94,66 @@ impl PlenumCore {
             peer: Some(address.clone()),
         }));
 
-        let mut start_payload = Vec::new();
-        start_payload.extend_from_slice(&file_size.to_be_bytes());
-        start_payload.extend_from_slice(file_name.as_bytes());
-        transport.send(&encode_packet(&Packet::new(
-            PacketType::Start,
-            0,
-            start_payload,
-        ))?)?;
+        run_send_transfer(
+            &mut transport,
+            sink,
+            &mut file,
+            file_size,
+            &file_name,
+            &request.options,
+            Some(address),
+            started_at,
+        )
+    }
 
-        let (mut sequence_no, resume_bytes) = negotiate_resume(&mut transport)?;
-        if resume_bytes > 0 {
-            sink.emit(PlenumEvent::Transfer(TransferEvent::Resumed {
-                direction: TransferDirection::Send,
-                next_sequence: sequence_no,
-                resumed_bytes: resume_bytes,
-            }));
-            file.seek(SeekFrom::Start(resume_bytes))?;
-        }
+    /// Sends a file over the internet via a relay/signaling server, acting as
+    /// the WebRTC offerer. See `crate::rtc::RtcTransport::connect_as_offerer`.
+    pub fn send_file_remote<S: EventSink>(
+        &mut self,
+        request: SendRemoteRequest,
+        sink: &mut S,
+    ) -> Result<TransferSummary, AppError> {
+        validate_send_remote_request(&request)?;
+        let started_at = Instant::now();
+        let mut file = File::open(&request.file_path)?;
+        let file_size = file.metadata()?.len();
+        let file_name = request
+            .file_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
 
-        sink.emit(PlenumEvent::Transfer(TransferEvent::Started {
-            direction: TransferDirection::Send,
-            file_name: file_name.clone(),
-            total_bytes: file_size,
-            resumed_bytes: resume_bytes,
-        }));
-
-        let mut sender =
-            SenderWindow::new(request.options.window_size, request.options.timeout_ticks)?;
-        let mut ack_sizes = BTreeMap::<u32, usize>::new();
-        let mut file_done = resume_bytes >= file_size;
-        let mut buffer = vec![0u8; request.options.chunk_size];
-        let mut bytes_acked = resume_bytes;
-
-        loop {
-            let now = now_ms();
-            while !file_done && sender.pending_len() < request.options.window_size * 2 {
-                let n = file.read(&mut buffer)?;
-                if n == 0 {
-                    file_done = true;
-                    break;
-                }
-
-                let packet = Packet::new(PacketType::Data, sequence_no, buffer[..n].to_vec());
-                sender.enqueue(packet)?;
-                ack_sizes.insert(sequence_no, n);
-                sequence_no = sequence_no.saturating_add(1);
-            }
-
-            while let Some(frame) = transport.recv()? {
-                let control = parse_packet(&frame)?;
-                if control.packet_type == PacketType::Ack {
-                    if let Some(size) = ack_sizes.remove(&control.sequence_no) {
-                        bytes_acked = bytes_acked.saturating_add(size as u64);
-                        sink.emit(PlenumEvent::Transfer(TransferEvent::Progress {
-                            direction: TransferDirection::Send,
-                            transferred_bytes: bytes_acked.min(file_size),
-                            total_bytes: file_size,
-                        }));
-                    }
-                }
-                sender.handle_control_packet(&control)?;
-            }
-
-            sender.retransmit_due(&mut transport, now)?;
-            sender.send_available(&mut transport, now)?;
-
-            if file_done && sender.is_empty() {
-                break;
-            }
-
-            thread::sleep(Duration::from_millis(1));
-        }
-
-        transport.send(&encode_packet(&Packet::new(
-            PacketType::Finish,
-            sequence_no,
-            Vec::new(),
-        ))?)?;
-        transport.close()?;
-
-        let summary = crate::app::types::TransferSummary {
-            direction: TransferDirection::Send,
-            file_name,
-            peer: Some(address),
-            total_bytes: file_size,
-            transferred_bytes: file_size,
-            resumed_bytes: resume_bytes,
-            elapsed_ms: started_at.elapsed().as_millis(),
-        };
-        sink.emit(PlenumEvent::Transfer(TransferEvent::Completed(
-            summary.clone(),
-        )));
         sink.emit(PlenumEvent::Transfer(TransferEvent::StateChanged {
             direction: TransferDirection::Send,
-            state: ConnectionState::Closed,
-            peer: summary.peer.clone(),
+            state: ConnectionState::SignalingConnected,
+            peer: Some(request.session_id.clone()),
         }));
-        Ok(summary)
+
+        let mut transport = RtcTransport::connect_as_offerer(
+            &request.relay_server_url,
+            &request.session_id,
+            &request.my_peer_id,
+            request.ice_servers.clone(),
+            Duration::from_secs(request.connect_timeout_secs),
+        )?;
+
+        sink.emit(PlenumEvent::Transfer(TransferEvent::StateChanged {
+            direction: TransferDirection::Send,
+            state: ConnectionState::Connected,
+            peer: Some(request.session_id.clone()),
+        }));
+
+        run_send_transfer(
+            &mut transport,
+            sink,
+            &mut file,
+            file_size,
+            &file_name,
+            &request.options,
+            Some(request.session_id.clone()),
+            started_at,
+        )
     }
 
     pub fn receive_file<S: EventSink>(
@@ -256,158 +220,55 @@ impl PlenumCore {
             let _ = thread.join();
         }
 
-        let mut receiver = ReceiverWindow::new();
-        let mut file: Option<File> = None;
-        let mut file_name = String::from("received_file");
-        let mut file_size = 0u64;
-        let mut bytes_received = 0u64;
-        let mut checkpoint: Option<ResumeCheckpoint> = None;
-        let mut checkpoint_path: Option<PathBuf> = None;
-        let mut peak_receiver_buffered = 0usize;
+        run_receive_transfer(
+            &mut transport,
+            sink,
+            &request.output_dir,
+            &request.options,
+            peer,
+            started_at,
+        )
+    }
 
-        loop {
-            let frame = match transport.recv() {
-                Ok(Some(frame)) => frame,
-                Ok(None) => continue,
-                Err(error) => {
-                    if transport.is_closed() {
-                        break;
-                    }
-                    return Err(error.into());
-                }
-            };
+    /// Receives a file over the internet via a relay/signaling server, acting
+    /// as the WebRTC answerer. See `crate::rtc::RtcTransport::connect_as_answerer`.
+    pub fn receive_file_remote<S: EventSink>(
+        &mut self,
+        request: ReceiveRemoteRequest,
+        sink: &mut S,
+    ) -> Result<TransferSummary, AppError> {
+        validate_receive_remote_request(&request)?;
+        create_dir_all(&request.output_dir)?;
+        let started_at = Instant::now();
 
-            let packet = parse_packet(&frame)?;
-            match packet.packet_type {
-                PacketType::Start => {
-                    if packet.payload.len() < 8 {
-                        return Err(AppError::InvalidRequest(
-                            "start packet payload must contain file size".into(),
-                        ));
-                    }
-
-                    let mut size_bytes = [0u8; 8];
-                    size_bytes.copy_from_slice(&packet.payload[0..8]);
-                    file_size = u64::from_be_bytes(size_bytes);
-                    file_name = String::from_utf8_lossy(&packet.payload[8..]).into_owned();
-                    let clean_name = Path::new(&file_name)
-                        .file_name()
-                        .unwrap_or_else(|| std::ffi::OsStr::new("received_file"))
-                        .to_string_lossy()
-                        .to_string();
-                    let out_path = request.output_dir.join(&clean_name);
-                    let cp_path = resume_checkpoint_path(&out_path);
-                    let (resume_sequence, resume_bytes, open_file, cp) = prepare_resume_state(
-                        &out_path,
-                        &cp_path,
-                        &clean_name,
-                        file_size,
-                        request.options.chunk_size,
-                    )?;
-
-                    file = Some(open_file);
-                    checkpoint = Some(cp);
-                    checkpoint_path = Some(cp_path.clone());
-                    receiver = ReceiverWindow::with_next_expected(resume_sequence);
-                    bytes_received = resume_bytes;
-                    file_name = clean_name;
-
-                    sink.emit(PlenumEvent::Transfer(TransferEvent::Started {
-                        direction: TransferDirection::Receive,
-                        file_name: file_name.clone(),
-                        total_bytes: file_size,
-                        resumed_bytes: resume_bytes,
-                    }));
-
-                    if resume_bytes > 0 {
-                        sink.emit(PlenumEvent::Transfer(TransferEvent::Resumed {
-                            direction: TransferDirection::Receive,
-                            next_sequence: resume_sequence,
-                            resumed_bytes: resume_bytes,
-                        }));
-                        transport.send(&encode_packet(&Packet::new(
-                            PacketType::Resume,
-                            resume_sequence,
-                            resume_bytes.to_be_bytes().to_vec(),
-                        ))?)?;
-                    }
-                }
-                PacketType::Data => {
-                    let controls = receiver.receive_data_packet(packet)?;
-                    for control in controls {
-                        transport.send(&encode_packet(&control)?)?;
-                    }
-
-                    peak_receiver_buffered =
-                        peak_receiver_buffered.max(receiver.buffered_payload_bytes());
-                    let drained = receiver.drain_ordered_packets();
-                    if !drained.is_empty() {
-                        for (_, payload) in drained {
-                            bytes_received = bytes_received.saturating_add(payload.len() as u64);
-                            if let Some(file) = file.as_mut() {
-                                file.write_all(&payload)?;
-                            }
-                        }
-
-                        if let Some(cp) = checkpoint.as_mut() {
-                            cp.update(receiver.next_expected(), bytes_received);
-                            if let Some(path) = checkpoint_path.as_ref() {
-                                cp.save(path)?;
-                                sink.emit(PlenumEvent::Transfer(
-                                    TransferEvent::CheckpointUpdated {
-                                        checkpoint_path: path.clone(),
-                                        next_sequence: cp.next_sequence,
-                                        bytes_written: cp.bytes_written,
-                                    },
-                                ));
-                            }
-                        }
-
-                        sink.emit(PlenumEvent::Transfer(TransferEvent::Progress {
-                            direction: TransferDirection::Receive,
-                            transferred_bytes: bytes_received.min(file_size),
-                            total_bytes: file_size,
-                        }));
-                    }
-                }
-                PacketType::Finish => {
-                    if let Some(path) = checkpoint_path.as_ref() {
-                        ResumeCheckpoint::clear(path)?;
-                    }
-                    break;
-                }
-                PacketType::Close => break,
-                PacketType::Resume => {}
-                _ => {}
-            }
-        }
-
-        // Tolerant close: the sender may have already disconnected, so
-        // closing an already-severed TCP stream is expected and not fatal.
-        let _ = transport.close();
-        let summary = crate::app::types::TransferSummary {
-            direction: TransferDirection::Receive,
-            file_name,
-            peer: Some(peer.clone()),
-            total_bytes: file_size,
-            transferred_bytes: bytes_received,
-            resumed_bytes: checkpoint
-                .as_ref()
-                .map(|cp| cp.bytes_written)
-                .unwrap_or(0)
-                .min(bytes_received),
-            elapsed_ms: started_at.elapsed().as_millis(),
-        };
-        let _ = peak_receiver_buffered;
-        sink.emit(PlenumEvent::Transfer(TransferEvent::Completed(
-            summary.clone(),
-        )));
         sink.emit(PlenumEvent::Transfer(TransferEvent::StateChanged {
             direction: TransferDirection::Receive,
-            state: ConnectionState::Closed,
-            peer: Some(peer),
+            state: ConnectionState::SignalingConnected,
+            peer: Some(request.session_id.clone()),
         }));
-        Ok(summary)
+
+        let mut transport = RtcTransport::connect_as_answerer(
+            &request.relay_server_url,
+            &request.session_id,
+            &request.my_peer_id,
+            request.ice_servers.clone(),
+            Duration::from_secs(request.connect_timeout_secs),
+        )?;
+
+        sink.emit(PlenumEvent::Transfer(TransferEvent::StateChanged {
+            direction: TransferDirection::Receive,
+            state: ConnectionState::Connected,
+            peer: Some(request.session_id.clone()),
+        }));
+
+        run_receive_transfer(
+            &mut transport,
+            sink,
+            &request.output_dir,
+            &request.options,
+            request.session_id.clone(),
+            started_at,
+        )
     }
 
     pub fn discover_peer<S: EventSink>(
@@ -633,6 +494,59 @@ fn validate_discover_request(request: &DiscoverRequest) -> Result<(), AppError> 
     Ok(())
 }
 
+fn validate_send_remote_request(request: &SendRemoteRequest) -> Result<(), AppError> {
+    require_permission(
+        &request.permissions,
+        PermissionKind::FileSystemRead,
+        "send_file_remote",
+    )?;
+    validate_remote_request_fields(
+        &request.relay_server_url,
+        &request.session_id,
+        request.connect_timeout_secs,
+    )?;
+    validate_transfer_options(&request.options)?;
+    Ok(())
+}
+
+fn validate_receive_remote_request(request: &ReceiveRemoteRequest) -> Result<(), AppError> {
+    require_permission(
+        &request.permissions,
+        PermissionKind::FileSystemWrite,
+        "receive_file_remote",
+    )?;
+    validate_remote_request_fields(
+        &request.relay_server_url,
+        &request.session_id,
+        request.connect_timeout_secs,
+    )?;
+    validate_transfer_options(&request.options)?;
+    Ok(())
+}
+
+fn validate_remote_request_fields(
+    relay_server_url: &str,
+    session_id: &str,
+    connect_timeout_secs: u64,
+) -> Result<(), AppError> {
+    if relay_server_url.trim().is_empty() {
+        return Err(AppError::InvalidRequest(
+            "relay server url must not be empty".into(),
+        ));
+    }
+    if session_id.trim().is_empty() {
+        return Err(AppError::InvalidRequest(
+            "session id must not be empty".into(),
+        ));
+    }
+    if connect_timeout_secs == 0 {
+        return Err(AppError::InvalidRequest(
+            "connect timeout must be greater than zero".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_transfer_options(options: &crate::app::types::TransferOptions) -> Result<(), AppError> {
     if options.chunk_size == 0 {
         return Err(AppError::InvalidRequest(
@@ -674,6 +588,282 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64
+}
+
+/// Runs the sender-side framing/window transfer loop over an already-connected
+/// transport (LAN TCP or internet WebRTC), given an open source file. Shared by
+/// `send_file` and `send_file_remote`.
+fn run_send_transfer<T: Transport, S: EventSink>(
+    transport: &mut T,
+    sink: &mut S,
+    file: &mut File,
+    file_size: u64,
+    file_name: &str,
+    options: &crate::app::types::TransferOptions,
+    peer_label: Option<String>,
+    started_at: Instant,
+) -> Result<TransferSummary, AppError> {
+    let file_name = file_name.to_string();
+    let mut start_payload = Vec::new();
+    start_payload.extend_from_slice(&file_size.to_be_bytes());
+    start_payload.extend_from_slice(file_name.as_bytes());
+    transport.send(&encode_packet(&Packet::new(
+        PacketType::Start,
+        0,
+        start_payload,
+    ))?)?;
+
+    let (mut sequence_no, resume_bytes) = negotiate_resume(transport)?;
+    if resume_bytes > 0 {
+        sink.emit(PlenumEvent::Transfer(TransferEvent::Resumed {
+            direction: TransferDirection::Send,
+            next_sequence: sequence_no,
+            resumed_bytes: resume_bytes,
+        }));
+        file.seek(SeekFrom::Start(resume_bytes))?;
+    }
+
+    sink.emit(PlenumEvent::Transfer(TransferEvent::Started {
+        direction: TransferDirection::Send,
+        file_name: file_name.clone(),
+        total_bytes: file_size,
+        resumed_bytes: resume_bytes,
+    }));
+
+    let mut sender = SenderWindow::new(options.window_size, options.timeout_ticks)?;
+    let mut ack_sizes = BTreeMap::<u32, usize>::new();
+    let mut file_done = resume_bytes >= file_size;
+    let mut buffer = vec![0u8; options.chunk_size];
+    let mut bytes_acked = resume_bytes;
+
+    loop {
+        let now = now_ms();
+        while !file_done && sender.pending_len() < options.window_size * 2 {
+            let n = file.read(&mut buffer)?;
+            if n == 0 {
+                file_done = true;
+                break;
+            }
+
+            let packet = Packet::new(PacketType::Data, sequence_no, buffer[..n].to_vec());
+            sender.enqueue(packet)?;
+            ack_sizes.insert(sequence_no, n);
+            sequence_no = sequence_no.saturating_add(1);
+        }
+
+        while let Some(frame) = transport.recv()? {
+            let control = parse_packet(&frame)?;
+            if control.packet_type == PacketType::Ack {
+                if let Some(size) = ack_sizes.remove(&control.sequence_no) {
+                    bytes_acked = bytes_acked.saturating_add(size as u64);
+                    sink.emit(PlenumEvent::Transfer(TransferEvent::Progress {
+                        direction: TransferDirection::Send,
+                        transferred_bytes: bytes_acked.min(file_size),
+                        total_bytes: file_size,
+                    }));
+                }
+            }
+            sender.handle_control_packet(&control)?;
+        }
+
+        sender.retransmit_due(transport, now)?;
+        sender.send_available(transport, now)?;
+
+        if file_done && sender.is_empty() {
+            break;
+        }
+
+        thread::sleep(Duration::from_millis(1));
+    }
+
+    transport.send(&encode_packet(&Packet::new(
+        PacketType::Finish,
+        sequence_no,
+        Vec::new(),
+    ))?)?;
+    transport.close()?;
+
+    let summary = TransferSummary {
+        direction: TransferDirection::Send,
+        file_name,
+        peer: peer_label,
+        total_bytes: file_size,
+        transferred_bytes: file_size,
+        resumed_bytes: resume_bytes,
+        elapsed_ms: started_at.elapsed().as_millis(),
+    };
+    sink.emit(PlenumEvent::Transfer(TransferEvent::Completed(
+        summary.clone(),
+    )));
+    sink.emit(PlenumEvent::Transfer(TransferEvent::StateChanged {
+        direction: TransferDirection::Send,
+        state: ConnectionState::Closed,
+        peer: summary.peer.clone(),
+    }));
+    Ok(summary)
+}
+
+/// Runs the receiver-side framing/window transfer loop over an already-connected
+/// transport (LAN TCP or internet WebRTC), writing into `output_dir`. Shared by
+/// `receive_file` and `receive_file_remote`.
+fn run_receive_transfer<T: Transport, S: EventSink>(
+    transport: &mut T,
+    sink: &mut S,
+    output_dir: &Path,
+    options: &crate::app::types::TransferOptions,
+    peer_label: String,
+    started_at: Instant,
+) -> Result<TransferSummary, AppError> {
+    let mut receiver = ReceiverWindow::new();
+    let mut file: Option<File> = None;
+    let mut file_name = String::from("received_file");
+    let mut file_size = 0u64;
+    let mut bytes_received = 0u64;
+    let mut checkpoint: Option<ResumeCheckpoint> = None;
+    let mut checkpoint_path: Option<PathBuf> = None;
+    let mut peak_receiver_buffered = 0usize;
+
+    loop {
+        let frame = match transport.recv() {
+            Ok(Some(frame)) => frame,
+            Ok(None) => continue,
+            Err(error) => {
+                if transport.is_closed() {
+                    break;
+                }
+                return Err(error.into());
+            }
+        };
+
+        let packet = parse_packet(&frame)?;
+        match packet.packet_type {
+            PacketType::Start => {
+                if packet.payload.len() < 8 {
+                    return Err(AppError::InvalidRequest(
+                        "start packet payload must contain file size".into(),
+                    ));
+                }
+
+                let mut size_bytes = [0u8; 8];
+                size_bytes.copy_from_slice(&packet.payload[0..8]);
+                file_size = u64::from_be_bytes(size_bytes);
+                file_name = String::from_utf8_lossy(&packet.payload[8..]).into_owned();
+                let clean_name = Path::new(&file_name)
+                    .file_name()
+                    .unwrap_or_else(|| std::ffi::OsStr::new("received_file"))
+                    .to_string_lossy()
+                    .to_string();
+                let out_path = output_dir.join(&clean_name);
+                let cp_path = resume_checkpoint_path(&out_path);
+                let (resume_sequence, resume_bytes, open_file, cp) = prepare_resume_state(
+                    &out_path,
+                    &cp_path,
+                    &clean_name,
+                    file_size,
+                    options.chunk_size,
+                )?;
+
+                file = Some(open_file);
+                checkpoint = Some(cp);
+                checkpoint_path = Some(cp_path.clone());
+                receiver = ReceiverWindow::with_next_expected(resume_sequence);
+                bytes_received = resume_bytes;
+                file_name = clean_name;
+
+                sink.emit(PlenumEvent::Transfer(TransferEvent::Started {
+                    direction: TransferDirection::Receive,
+                    file_name: file_name.clone(),
+                    total_bytes: file_size,
+                    resumed_bytes: resume_bytes,
+                }));
+
+                if resume_bytes > 0 {
+                    sink.emit(PlenumEvent::Transfer(TransferEvent::Resumed {
+                        direction: TransferDirection::Receive,
+                        next_sequence: resume_sequence,
+                        resumed_bytes: resume_bytes,
+                    }));
+                    transport.send(&encode_packet(&Packet::new(
+                        PacketType::Resume,
+                        resume_sequence,
+                        resume_bytes.to_be_bytes().to_vec(),
+                    ))?)?;
+                }
+            }
+            PacketType::Data => {
+                let controls = receiver.receive_data_packet(packet)?;
+                for control in controls {
+                    transport.send(&encode_packet(&control)?)?;
+                }
+
+                peak_receiver_buffered =
+                    peak_receiver_buffered.max(receiver.buffered_payload_bytes());
+                let drained = receiver.drain_ordered_packets();
+                if !drained.is_empty() {
+                    for (_, payload) in drained {
+                        bytes_received = bytes_received.saturating_add(payload.len() as u64);
+                        if let Some(file) = file.as_mut() {
+                            file.write_all(&payload)?;
+                        }
+                    }
+
+                    if let Some(cp) = checkpoint.as_mut() {
+                        cp.update(receiver.next_expected(), bytes_received);
+                        if let Some(path) = checkpoint_path.as_ref() {
+                            cp.save(path)?;
+                            sink.emit(PlenumEvent::Transfer(TransferEvent::CheckpointUpdated {
+                                checkpoint_path: path.clone(),
+                                next_sequence: cp.next_sequence,
+                                bytes_written: cp.bytes_written,
+                            }));
+                        }
+                    }
+
+                    sink.emit(PlenumEvent::Transfer(TransferEvent::Progress {
+                        direction: TransferDirection::Receive,
+                        transferred_bytes: bytes_received.min(file_size),
+                        total_bytes: file_size,
+                    }));
+                }
+            }
+            PacketType::Finish => {
+                if let Some(path) = checkpoint_path.as_ref() {
+                    ResumeCheckpoint::clear(path)?;
+                }
+                break;
+            }
+            PacketType::Close => break,
+            PacketType::Resume => {}
+            _ => {}
+        }
+    }
+
+    // Tolerant close: the sender may have already disconnected, so
+    // closing an already-severed connection is expected and not fatal.
+    let _ = transport.close();
+    let summary = TransferSummary {
+        direction: TransferDirection::Receive,
+        file_name,
+        peer: Some(peer_label.clone()),
+        total_bytes: file_size,
+        transferred_bytes: bytes_received,
+        resumed_bytes: checkpoint
+            .as_ref()
+            .map(|cp| cp.bytes_written)
+            .unwrap_or(0)
+            .min(bytes_received),
+        elapsed_ms: started_at.elapsed().as_millis(),
+    };
+    let _ = peak_receiver_buffered;
+    sink.emit(PlenumEvent::Transfer(TransferEvent::Completed(
+        summary.clone(),
+    )));
+    sink.emit(PlenumEvent::Transfer(TransferEvent::StateChanged {
+        direction: TransferDirection::Receive,
+        state: ConnectionState::Closed,
+        peer: Some(peer_label),
+    }));
+    Ok(summary)
 }
 
 fn negotiate_resume<T: Transport>(transport: &mut T) -> Result<(u32, u64), AppError> {

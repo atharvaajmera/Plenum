@@ -3,18 +3,29 @@ name = "plenum"
 version = "0.1.0"
 edition = "2024"
 [workspace]
-members = ["desktop/src-tauri", "mobile/rust"]
+members = ["desktop/src-tauri", "mobile/rust", "relay-server"]
 
 [dependencies]
 base64 = "0.22"
 chacha20poly1305 = "0.10"
 hmac = "0.12"
+if-addrs = "0.13"
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 clap = { version = "4.5", features = ["derive"] }
 indicatif = "0.17"
+webrtc = "=0.17.1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net", "time"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+url = "2"
+bytes = "1"
+
+[dev-dependencies]
+relay-server = { path = "relay-server" }
+axum = { version = "0.8", features = ["ws"] }
 
 [profile.release]
 codegen-units = 1
