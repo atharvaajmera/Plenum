@@ -11,11 +11,23 @@ export interface ReceiveSettings {
   requirePin: boolean;
 }
 
+export interface IceServerSetting {
+  urls: string;       // single URL string in the UI (e.g. "stun:stun.l.google.com:19302"); split/wrap into IceServer.urls: [urls] when building a request
+  username?: string;
+  credential?: string;
+}
+
+export interface InternetSettings {
+  relayServerUrl: string;
+  iceServers: IceServerSetting[];
+}
+
 export interface SettingsState {
   themeIndex: number; // 0=System, 1=Dark, 2=Light
   colorIndex: number; // 0=Plenum, 1=Ocean, 2=Forest
   general: GeneralSettings;
   receive: ReceiveSettings;
+  internet: InternetSettings;
 }
 
 export interface SettingsContextType {
@@ -35,6 +47,10 @@ const defaultSettings: SettingsState = {
     quickSave: false,
     quickSaveFavorites: false,
     requirePin: false,
+  },
+  internet: {
+    relayServerUrl: "",
+    iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
   },
 };
 

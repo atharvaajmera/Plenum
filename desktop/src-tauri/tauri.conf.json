@@ -42,9 +42,7 @@
     "windows": {
       "nsis": {
         "installerIcon": "icons/icon.ico",
-        "headerImage": null,
-        "sidebarImage": null,
-        "customNsiPath": "nsis/installer.nsi"
+        "template": "nsis/installer.nsi"
       }
     }
   }

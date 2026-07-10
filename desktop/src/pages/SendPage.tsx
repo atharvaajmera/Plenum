@@ -1,11 +1,14 @@
 import React, { useState, useEffect } from "react";
-import { File, Folder, AlignLeft, ClipboardPaste, RefreshCcw, Monitor, Heart, Settings } from "lucide-react";
+import { File, Folder, AlignLeft, ClipboardPaste, RefreshCcw, Monitor, Heart, Settings, Wifi, Globe } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
-import { PlenumEvent, DiscoverRequest, DiscoverySummary, SendRequest, TransferSummary } from "../types/rust";
+import { PlenumEvent, DiscoverRequest, DiscoverySummary, SendRequest, SendRemoteRequest, TransferSummary } from "../types/rust";
+import { useSettings } from "../context/SettingsContext";
 
 const SendPage: React.FC = () => {
+  const { settings } = useSettings();
+  const [mode, setMode] = useState<"local" | "internet">("local");
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [selectionType, setSelectionType] = useState<"file" | "folder" | "text" | "paste" | null>(null);
   const [peers, setPeers] = useState<DiscoverySummary[]>([]);
@@ -15,6 +18,8 @@ const SendPage: React.FC = () => {
   const [isDragging, setIsDragging] = useState(false);
   const [pinInputPeer, setPinInputPeer] = useState<DiscoverySummary | null>(null);
   const [pinInput, setPinInput] = useState("");
+  const [roomCodeInput, setRoomCodeInput] = useState("");
+  const [isConnectingRemote, setIsConnectingRemote] = useState(false);
 
   const startDiscovery = async () => {
     setIsDiscovering(true);
@@ -136,6 +141,42 @@ const SendPage: React.FC = () => {
     }
   };
 
+  const handleRoomCodeConnect = async () => {
+    if (!selectedPath) {
+      setTransferStatus("Please select a file or folder first");
+      return;
+    }
+    if (roomCodeInput.trim() === "") {
+      setTransferStatus("Please enter a room code");
+      return;
+    }
+
+    setTransferStatus("Connecting to relay...");
+    setIsConnectingRemote(true);
+
+    try {
+      const myPeerId = await invoke<string>("generate_peer_id_command");
+      const req: SendRemoteRequest = {
+        file_path: selectedPath!,
+        relay_server_url: settings.internet.relayServerUrl,
+        session_id: roomCodeInput.trim().toUpperCase(),
+        my_peer_id: myPeerId,
+        ice_servers: settings.internet.iceServers.map(s => ({ urls: [s.urls], username: s.username, credential: s.credential })),
+        connect_timeout_secs: 30,
+        permissions: { local_network: true, file_system_read: true, file_system_write: true, background_transfer: false },
+        options: { chunk_size: 32768, window_size: 128, timeout_ticks: 1000 }
+      };
+      const result = await invoke<TransferSummary>("send_file_remote_command", { request: req });
+      console.log("Send completed:", result);
+    } catch (err) {
+      console.error("Send error:", err);
+      setTransferStatus("Error: " + err);
+      setProgress(null);
+    } finally {
+      setIsConnectingRemote(false);
+    }
+  };
+
   const handleSelectFile = async () => {
     try {
       const selected = await open({ multiple: false, directory: false });
@@ -187,6 +228,20 @@ const SendPage: React.FC = () => {
         </div>
       )}
       <div className="card-section">
+        <h2 className="section-title">Mode</h2>
+        <div className="card-grid">
+          <div className="action-card" onClick={() => setMode("local")} style={{ borderColor: mode === "local" ? "var(--accent-primary)" : "var(--border-color)" }}>
+            <Wifi size={28} />
+            <span>Local Network</span>
+          </div>
+          <div className="action-card" onClick={() => setMode("internet")} style={{ borderColor: mode === "internet" ? "var(--accent-primary)" : "var(--border-color)" }}>
+            <Globe size={28} />
+            <span>Internet</span>
+          </div>
+        </div>
+      </div>
+
+      <div className="card-section">
         <h2 className="section-title">Selection</h2>
         <div className="card-grid">
           <div className="action-card" onClick={handleSelectFile} style={{ borderColor: selectionType === "file" ? "var(--accent-primary)" : "var(--border-color)" }}>
@@ -213,15 +268,62 @@ const SendPage: React.FC = () => {
         )}
       </div>
 
+      {mode === "internet" && (
+        <div className="card-section">
+          <div className="section-title">
+            <span>Connect via room code</span>
+          </div>
+          <div style={{ display: "flex", gap: "12px" }}>
+            <input
+              type="text"
+              value={roomCodeInput}
+              onChange={(e) => setRoomCodeInput(e.target.value)}
+              placeholder="Enter room code"
+              style={{ flex: 1, padding: "10px 12px", borderRadius: "8px", border: "1px solid var(--border-color)", backgroundColor: "var(--bg-sidebar)", color: "var(--text-primary)", outline: "none", fontSize: "14px", letterSpacing: "2px", textTransform: "uppercase" }}
+              onKeyDown={(e) => { if (e.key === "Enter") handleRoomCodeConnect(); }}
+            />
+            <button
+              onClick={handleRoomCodeConnect}
+              disabled={isConnectingRemote}
+              style={{ padding: "10px 20px", borderRadius: "8px", border: "none", backgroundColor: "var(--accent-primary)", color: "white", fontWeight: 600, cursor: isConnectingRemote ? "default" : "pointer", opacity: isConnectingRemote ? 0.6 : 1 }}
+            >
+              Connect
+            </button>
+          </div>
+
+          {transferStatus && (
+            <div style={{ marginTop: "24px", padding: "16px", backgroundColor: "var(--bg-card)", borderRadius: "8px", textAlign: "center" }}>
+              <div style={{ fontSize: "14px", color: "var(--text-secondary)" }}>
+                {transferStatus}
+              </div>
+              {progress && (
+                <div style={{ marginTop: "12px", width: "100%" }}>
+                  <div style={{ width: "100%", backgroundColor: "var(--bg-sidebar)", height: "6px", borderRadius: "3px", overflow: "hidden" }}>
+                    <div style={{ width: `${(progress.transferred / progress.total) * 100}%`, backgroundColor: "var(--accent-primary)", height: "100%" }} />
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          <div style={{ marginTop: "40px", textAlign: "center" }}>
+            <p style={{ fontSize: "13px", color: "var(--text-secondary)", marginTop: "16px" }}>
+              Ask the receiver for their room code, then click Connect to send over the internet.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {mode === "local" && (
       <div className="card-section">
         <div className="section-title" style={{ justifyContent: "space-between" }}>
           <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
             <span>Nearby devices</span>
-            <RefreshCcw 
-              size={16} 
-              color={isDiscovering ? "var(--text-secondary)" : "var(--accent-primary)"} 
-              style={{ cursor: "pointer", opacity: isDiscovering ? 0.5 : 1 }} 
-              onClick={startDiscovery} 
+            <RefreshCcw
+              size={16}
+              color={isDiscovering ? "var(--text-secondary)" : "var(--accent-primary)"}
+              style={{ cursor: "pointer", opacity: isDiscovering ? 0.5 : 1 }}
+              onClick={startDiscovery}
             />
           </div>
         </div>
@@ -307,6 +409,7 @@ const SendPage: React.FC = () => {
           </p>
         </div>
       </div>
+      )}
     </div>
   );
 };

@@ -33,13 +33,41 @@ export interface ReceiveRequest {
     options: TransferOptions;
 }
 
+export interface IceServer {
+    urls: string[];
+    username?: string;
+    credential?: string;
+}
+
+export interface SendRemoteRequest {
+    file_path: string;
+    relay_server_url: string;
+    session_id: string;
+    my_peer_id: string;
+    ice_servers: IceServer[];
+    connect_timeout_secs: number;
+    permissions: CorePermissions;
+    options: TransferOptions;
+}
+
+export interface ReceiveRemoteRequest {
+    output_dir: string;
+    relay_server_url: string;
+    session_id: string;
+    my_peer_id: string;
+    ice_servers: IceServer[];
+    connect_timeout_secs: number;
+    permissions: CorePermissions;
+    options: TransferOptions;
+}
+
 export interface DiscoverySummary {
     hostname: string;
     address: string;
     token: string;
 }
 
-export type ConnectionState = "Discovering" | "Listening" | "Connecting" | "Connected" | "Closed";
+export type ConnectionState = "Discovering" | "Listening" | "Connecting" | "SignalingConnected" | "NegotiatingIce" | "Connected" | "Closed";
 export type TransferDirection = "Send" | "Receive";
 
 export interface TransferSummary {

@@ -43,7 +43,11 @@ pub fn run() {
             get_local_ip,
             commands::send_file_command,
             commands::receive_file_command,
-            commands::discover_peers_command
+            commands::discover_peers_command,
+            commands::send_file_remote_command,
+            commands::receive_file_remote_command,
+            commands::generate_room_code_command,
+            commands::generate_peer_id_command
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
