@@ -68,6 +68,22 @@ fn wire_data_channel(
     }));
 }
 
+/// Flush ICE candidates that were received and buffered before the remote
+/// description was set, applying them now that add_ice_candidate will accept
+/// them. Drains the buffer.
+async fn flush_pending_candidates(
+    peer_connection: &Arc<RTCPeerConnection>,
+    pending: &mut Vec<RTCIceCandidateInit>,
+) -> Result<(), RtcError> {
+    for init in pending.drain(..) {
+        peer_connection
+            .add_ice_candidate(init)
+            .await
+            .map_err(|error| RtcError::PeerConnection(error.to_string()))?;
+    }
+    Ok(())
+}
+
 async fn send_ws_message(
     ws_tx: &mut futures_util::stream::SplitSink<
         tokio_tungstenite::WebSocketStream<
@@ -187,6 +203,13 @@ pub async fn run_offerer(
 
     let mut data_channel_created = false;
     let mut pending_data_channel: Option<Arc<RTCDataChannel>> = None;
+    // Remote ICE candidates can arrive before the answer sets our remote
+    // description (candidates gather the moment we set_local_description, so the
+    // peer may trickle some before its Answer reaches us). webrtc-rs rejects
+    // add_ice_candidate with ErrNoRemoteDescription in that window, so buffer
+    // early candidates and flush them once the remote description is set.
+    let mut remote_description_set = false;
+    let mut pending_remote_candidates: Vec<RTCIceCandidateInit> = Vec::new();
 
     loop {
         tokio::select! {
@@ -250,6 +273,8 @@ pub async fn run_offerer(
                             .set_remote_description(answer)
                             .await
                             .map_err(|error| RtcError::PeerConnection(error.to_string()))?;
+                        remote_description_set = true;
+                        flush_pending_candidates(&peer_connection, &mut pending_remote_candidates).await?;
                     }
                     SignalMessage::IceCandidate { candidate, sdp_mid, sdp_mline_index, .. } => {
                         let init = RTCIceCandidateInit {
@@ -258,10 +283,14 @@ pub async fn run_offerer(
                             sdp_mline_index,
                             ..Default::default()
                         };
-                        peer_connection
-                            .add_ice_candidate(init)
-                            .await
-                            .map_err(|error| RtcError::PeerConnection(error.to_string()))?;
+                        if remote_description_set {
+                            peer_connection
+                                .add_ice_candidate(init)
+                                .await
+                                .map_err(|error| RtcError::PeerConnection(error.to_string()))?;
+                        } else {
+                            pending_remote_candidates.push(init);
+                        }
                     }
                     SignalMessage::Error { message } => {
                         return Err(RtcError::Signaling(message));
@@ -358,6 +387,10 @@ pub async fn run_answerer(
     });
 
     let mut answered = false;
+    // See the offerer's comment: buffer remote ICE candidates that arrive before
+    // we've set the remote description (the offer), then flush once it's set.
+    let mut remote_description_set = false;
+    let mut pending_remote_candidates: Vec<RTCIceCandidateInit> = Vec::new();
 
     loop {
         tokio::select! {
@@ -386,6 +419,8 @@ pub async fn run_answerer(
                             .set_remote_description(offer)
                             .await
                             .map_err(|error| RtcError::PeerConnection(error.to_string()))?;
+                        remote_description_set = true;
+                        flush_pending_candidates(&peer_connection, &mut pending_remote_candidates).await?;
 
                         let answer = peer_connection
                             .create_answer(None)
@@ -414,10 +449,14 @@ pub async fn run_answerer(
                             sdp_mline_index,
                             ..Default::default()
                         };
-                        peer_connection
-                            .add_ice_candidate(init)
-                            .await
-                            .map_err(|error| RtcError::PeerConnection(error.to_string()))?;
+                        if remote_description_set {
+                            peer_connection
+                                .add_ice_candidate(init)
+                                .await
+                                .map_err(|error| RtcError::PeerConnection(error.to_string()))?;
+                        } else {
+                            pending_remote_candidates.push(init);
+                        }
                     }
                     SignalMessage::Error { message } => {
                         return Err(RtcError::Signaling(message));

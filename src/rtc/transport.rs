@@ -124,11 +124,16 @@ impl RtcTransport {
 
             // Drive outbound sends and shutdown on this same background thread
             // for the remaining lifetime of the transport.
+            //
+            // `biased` makes select poll the outbound queue *before* the
+            // shutdown signal on every iteration. Without it, when the engine
+            // calls `send(Finish)` immediately followed by `close()`, both
+            // branches are ready and a random pick can observe shutdown first,
+            // dropping the final `Finish` packet — leaving the receiver stuck at
+            // 100% having never seen end-of-transfer.
             loop {
                 tokio::select! {
-                    _ = &mut shutdown_rx => {
-                        break;
-                    }
+                    biased;
                     maybe_bytes = outbound_rx.recv() => {
                         match maybe_bytes {
                             Some(bytes) => {
@@ -139,7 +144,28 @@ impl RtcTransport {
                             None => break,
                         }
                     }
+                    _ = &mut shutdown_rx => {
+                        break;
+                    }
                 }
+            }
+
+            // Graceful close: flush anything still queued, then wait for the
+            // SCTP send buffer to drain so the peer actually receives the final
+            // bytes (e.g. the `Finish` packet) before we tear the connection
+            // down. webrtc-rs's `close()` is abrupt and discards buffered data.
+            while let Ok(bytes) = outbound_rx.try_recv() {
+                if data_channel.send(&Bytes::from(bytes)).await.is_err() {
+                    break;
+                }
+            }
+            // Bounded wait (~2s) for the send buffer to empty. Ordered/reliable
+            // SCTP guarantees delivery once buffered_amount reaches zero.
+            for _ in 0..200 {
+                if data_channel.buffered_amount().await == 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
 
             let _ = peer_connection.close().await;
