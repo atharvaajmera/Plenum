@@ -33,6 +33,12 @@ services:
       - "--realm=plenum.local"
       - "--min-port=49152"
       - "--max-port=49452"
+      # TEMP DIAG: log to stdout + verbose so `docker compose logs coturn` shows
+      # TURN allocations and relayed traffic (confirms whether media actually
+      # uses the relay when direct P2P fails).
+      - "--log-file=stdout"
+      - "--simple-log"
+      - "--verbose"
 
   caddy:
     image: caddy:2

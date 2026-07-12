@@ -5,10 +5,23 @@
 }
 
 {$CADDY_DOMAIN} {
-	reverse_proxy /ws relay-server:8080
-	reverse_proxy /turn-credentials relay-server:8080
-	reverse_proxy /healthz relay-server:8080
+	# Route only the relay API surface to relay-server. `handle` blocks are
+	# mutually exclusive and ordered, so the bare `handle` below acts as a
+	# catch-all fallback. (A bare `respond 404` cannot be used for this: the
+	# `respond` directive sorts before `reverse_proxy`, so it would answer
+	# every request -- including the proxied paths -- with 404.)
+	handle /ws {
+		reverse_proxy relay-server:8080
+	}
+	handle /turn-credentials {
+		reverse_proxy relay-server:8080
+	}
+	handle /healthz {
+		reverse_proxy relay-server:8080
+	}
 
 	# Anything else on this domain is not part of the relay API surface.
-	respond 404
+	handle {
+		respond 404
+	}
 }
