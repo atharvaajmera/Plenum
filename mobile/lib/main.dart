@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:mobile/src/rust/api/plenum_api.dart';
 import 'package:mobile/src/rust/frb_generated.dart';
 import 'package:permission_handler/permission_handler.dart';
 
@@ -11,10 +10,10 @@ import 'theme.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await RustLib.init();
-  
-  // Request necessary permissions for Phase 14
+
+  // LAN discovery needs nearby-wifi access; storage permission is requested
+  // contextually when receiving a file (see ReceiveStorage.ensurePermission).
   await [
-    Permission.storage,
     Permission.nearbyWifiDevices,
   ].request();
 

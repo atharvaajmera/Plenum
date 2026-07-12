@@ -1,13 +1,33 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:mobile/src/rust/api/plenum_api.dart';
+import '../config.dart';
 import '../services/internet_settings.dart';
+import '../services/media_scanner.dart';
+import '../services/receive_storage.dart';
 import '../theme.dart';
 import '../widgets/animated_radar.dart';
 
 enum _TransferMode { local, internet }
+
+String _friendlyState(String state) {
+  switch (state) {
+    case 'Discovering':
+      return 'Searching...';
+    case 'Listening':
+      return 'Ready to receive files';
+    case 'Connecting':
+    case 'SignalingConnected':
+      return 'Connecting to device...';
+    case 'NegotiatingIce':
+      return 'Establishing connection...';
+    case 'Connected':
+      return 'Connected to device...';
+    default:
+      return 'Connecting to device...';
+  }
+}
 
 class ReceiveScreen extends StatefulWidget {
   const ReceiveScreen({super.key});
@@ -30,14 +50,28 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
   bool _remoteStarted = false;
 
   void _startReceiving() async {
-    final dir = await getApplicationDocumentsDirectory();
+    final granted = await ReceiveStorage.ensurePermission();
+    if (!granted) {
+      if (mounted) {
+        setState(() => _statusMessage = 'Storage permission needed to save files');
+      }
+      return;
+    }
+    final outputDir = await ReceiveStorage.outputDir();
     setState(() {
       _isListening = true;
       _statusMessage = 'Listening for incoming files...';
     });
 
-    startReceive(outputDir: dir.path, port: 8080, announce: true).listen((eventJson) {
+    startReceive(outputDir: outputDir, port: 0, announce: true).listen((eventJson) {
       final event = jsonDecode(eventJson);
+
+      if (event['Log'] != null) {
+        // TEMP DIAG
+        // ignore: avoid_print
+        print('[PLENUM] ${event['Log']['message']}');
+        return;
+      }
 
       if (event['Discovery'] != null) {
         final discEvent = event['Discovery'];
@@ -57,6 +91,8 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
             _progress = p['transferred_bytes'] / p['total_bytes'];
           });
         } else if (transEvent['Completed'] != null) {
+          final fileName = transEvent['Completed']['file_name'];
+          if (fileName != null) MediaScanner.scan('$outputDir/$fileName');
           setState(() {
             _statusMessage = 'Transfer complete!';
             _progress = 1.0;
@@ -76,6 +112,15 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     if (_remoteStarted) return;
     _remoteStarted = true;
 
+    final granted = await ReceiveStorage.ensurePermission();
+    if (!granted) {
+      if (mounted) {
+        setState(() => _statusMessage = 'Storage permission needed to save files');
+      }
+      _remoteStarted = false;
+      return;
+    }
+
     setState(() {
       _statusMessage = 'Generating room code...';
       _roomCode = null;
@@ -88,26 +133,33 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     if (!mounted) return;
     setState(() => _roomCode = code);
 
-    final relayServerUrl = await InternetSettings.loadRelayServerUrl();
-    if (relayServerUrl.isEmpty) {
-      if (mounted) setState(() => _statusMessage = 'Set a Relay Server URL in Settings first');
-      return;
-    }
-    final iceServers = await InternetSettings.loadIceServers();
+    const relayServerUrl = PlenumConfig.relayServerUrl;
+    final iceServers = PlenumConfig.defaultIceServers();
 
     if (mounted) setState(() => _statusMessage = 'Waiting for sender...');
 
-    final dir = await getApplicationDocumentsDirectory();
+    final outputDir = await ReceiveStorage.outputDir();
+    final iceServersJson = await InternetSettings.buildIceServersJsonWithTurn(
+      relayServerUrl,
+      myPeerId,
+      iceServers,
+    );
 
     startReceiveRemote(
-      outputDir: dir.path,
+      outputDir: outputDir,
       relayServerUrl: relayServerUrl,
       sessionId: code,
       myPeerId: myPeerId,
-      iceServersJson: InternetSettings.encodeIceServersForFfi(iceServers),
+      iceServersJson: iceServersJson,
       connectTimeoutSecs: BigInt.from(30),
     ).listen((eventJson) {
       final event = jsonDecode(eventJson);
+      if (event['Log'] != null) {
+        // TEMP DIAG
+        // ignore: avoid_print
+        print('[PLENUM] ${event['Log']['message']}');
+        return;
+      }
       if (event['Transfer'] != null) {
         final trans = event['Transfer'];
         if (trans['StateChanged'] != null) {
@@ -115,7 +167,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
             setState(() {
               _statusMessage = trans['StateChanged']['state'] == 'Connected'
                   ? 'Connected to device...'
-                  : trans['StateChanged']['state'];
+                  : _friendlyState(trans['StateChanged']['state']);
             });
           }
         } else if (trans['Started'] != null) {
@@ -128,6 +180,8 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
             _progress = trans['Progress']['transferred_bytes'] / trans['Progress']['total_bytes'];
           });
         } else if (trans['Completed'] != null) {
+          final fileName = trans['Completed']['file_name'];
+          if (fileName != null) MediaScanner.scan('$outputDir/$fileName');
           setState(() {
             _statusMessage = 'Received successfully!';
             _progress = 1.0;
@@ -222,7 +276,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                 decoration: BoxDecoration(
                   color: AppTheme.bgCard,
                   borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: AppTheme.accentPrimary, width: 1, style: BorderStyle.solid), // Dashed isn't native, using solid for now
+                  border: Border.all(color: AppTheme.accentPrimary, width: 1, style: BorderStyle.solid),
                 ),
                 child: Column(
                   mainAxisSize: MainAxisSize.min,

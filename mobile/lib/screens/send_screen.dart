@@ -2,10 +2,29 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:mobile/src/rust/api/plenum_api.dart';
+import '../config.dart';
 import '../services/internet_settings.dart';
 import '../theme.dart';
 
 enum _TransferMode { local, internet }
+
+String _friendlyState(String state) {
+  switch (state) {
+    case 'Discovering':
+      return 'Searching for devices...';
+    case 'Listening':
+      return 'Ready to send';
+    case 'Connecting':
+    case 'SignalingConnected':
+      return 'Connecting to device...';
+    case 'NegotiatingIce':
+      return 'Establishing connection...';
+    case 'Connected':
+      return 'Connected to device...';
+    default:
+      return 'Connecting to device...';
+  }
+}
 
 class SendScreen extends StatefulWidget {
   const SendScreen({super.key});
@@ -74,11 +93,17 @@ class _SendScreenState extends State<SendScreen> {
 
   void _handleTransferEvent(String eventJson) {
     final event = jsonDecode(eventJson);
+    if (event['Log'] != null) {
+      // TEMP DIAG
+      // ignore: avoid_print
+      print('[PLENUM] ${event['Log']['message']}');
+      return;
+    }
     if (event['Transfer'] != null) {
       final trans = event['Transfer'];
       if (trans['StateChanged'] != null) {
         if (trans['StateChanged']['state'] != 'Closed') {
-          setState(() => _transferStatus = trans['StateChanged']['state']);
+          setState(() => _transferStatus = _friendlyState(trans['StateChanged']['state']));
         }
       } else if (trans['Started'] != null) {
         setState(() {
@@ -116,12 +141,8 @@ class _SendScreenState extends State<SendScreen> {
       return;
     }
 
-    final relayServerUrl = await InternetSettings.loadRelayServerUrl();
-    if (relayServerUrl.isEmpty) {
-      setState(() => _transferStatus = 'Set a Relay Server URL in Settings first');
-      return;
-    }
-    final iceServers = await InternetSettings.loadIceServers();
+    const relayServerUrl = PlenumConfig.relayServerUrl;
+    final iceServers = PlenumConfig.defaultIceServers();
 
     setState(() {
       _transferStatus = 'Connecting to relay...';
@@ -130,12 +151,17 @@ class _SendScreenState extends State<SendScreen> {
 
     try {
       final myPeerId = generatePeerIdSync();
+      final iceServersJson = await InternetSettings.buildIceServersJsonWithTurn(
+        relayServerUrl,
+        myPeerId,
+        iceServers,
+      );
       startSendRemote(
         filePath: _selectedFile!,
         relayServerUrl: relayServerUrl,
         sessionId: roomCode.toUpperCase(),
         myPeerId: myPeerId,
-        iceServersJson: InternetSettings.encodeIceServersForFfi(iceServers),
+        iceServersJson: iceServersJson,
         connectTimeoutSecs: BigInt.from(30),
       ).listen(
         _handleTransferEvent,
