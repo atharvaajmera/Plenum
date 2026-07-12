@@ -1,4 +1,6 @@
+use std::io::Write;
 use std::net::TcpListener;
+use std::net::TcpStream;
 use std::thread;
 use std::time::Duration;
 
@@ -71,6 +73,74 @@ fn carries_encoded_protocol_packets_over_tcp() {
 
     assert_eq!(ack.packet_type, PacketType::Ack);
     assert_eq!(ack.sequence_no, 12);
+    server.join().expect("server thread should finish");
+}
+
+/// Regression: a single length-prefixed frame whose bytes arrive split across
+/// multiple socket reads (straddling the transport's internal read timeout)
+/// must still be reassembled intact. The earlier implementation discarded the
+/// partial bytes on a read timeout, desyncing the framing.
+#[test]
+fn reassembles_frame_split_across_reads() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let addr = listener
+        .local_addr()
+        .expect("listener should have local addr");
+
+    let server = thread::spawn(move || {
+        let mut server = TcpTransport::accept(&listener).expect("server should accept client");
+        let frame = wait_recv(&mut server);
+        assert_eq!(frame, b"hello world".to_vec());
+    });
+
+    // Connect a *raw* stream so we control exactly how bytes are flushed.
+    let mut raw = TcpStream::connect(addr).expect("raw client should connect");
+    let payload = b"hello world";
+    let len = (payload.len() as u32).to_be_bytes();
+
+    // Send 2 of the 4 length-prefix bytes, pause past the 5ms read timeout,
+    // then the rest of the prefix, pause, then the body in two pieces.
+    raw.write_all(&len[..2]).unwrap();
+    raw.flush().unwrap();
+    thread::sleep(Duration::from_millis(20));
+    raw.write_all(&len[2..]).unwrap();
+    raw.flush().unwrap();
+    thread::sleep(Duration::from_millis(20));
+    raw.write_all(&payload[..4]).unwrap();
+    raw.flush().unwrap();
+    thread::sleep(Duration::from_millis(20));
+    raw.write_all(&payload[4..]).unwrap();
+    raw.flush().unwrap();
+
+    server.join().expect("server thread should finish");
+}
+
+/// Two frames delivered back-to-back in a single write must both be read out,
+/// with the second frame preserved in the buffer across `recv()` calls.
+#[test]
+fn reads_two_frames_from_one_segment() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let addr = listener
+        .local_addr()
+        .expect("listener should have local addr");
+
+    let server = thread::spawn(move || {
+        let mut server = TcpTransport::accept(&listener).expect("server should accept client");
+        let first = wait_recv(&mut server);
+        let second = wait_recv(&mut server);
+        assert_eq!(first, b"AAAA".to_vec());
+        assert_eq!(second, b"BBBBBB".to_vec());
+    });
+
+    let mut raw = TcpStream::connect(addr).expect("raw client should connect");
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&(4u32).to_be_bytes());
+    buf.extend_from_slice(b"AAAA");
+    buf.extend_from_slice(&(6u32).to_be_bytes());
+    buf.extend_from_slice(b"BBBBBB");
+    raw.write_all(&buf).unwrap();
+    raw.flush().unwrap();
+
     server.join().expect("server thread should finish");
 }
 
