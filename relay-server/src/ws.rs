@@ -8,7 +8,36 @@ use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
 use plenum::signaling::{RoutedSignal, SignalMessage};
 use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
+
+/// TEMP DIAG: short human label for a signaling message, including from/to peer
+/// ids where present, so relay logs show the full negotiation flow.
+fn signal_label(msg: &SignalMessage) -> String {
+    match msg {
+        SignalMessage::JoinSession { peer_id, session_id } => {
+            format!("JoinSession(peer={peer_id}, session={session_id})")
+        }
+        SignalMessage::LeaveSession { peer_id, session_id } => {
+            format!("LeaveSession(peer={peer_id}, session={session_id})")
+        }
+        SignalMessage::PeerJoined { peer_id, session_id } => {
+            format!("PeerJoined(peer={peer_id}, session={session_id})")
+        }
+        SignalMessage::PeerLeft { peer_id, session_id } => {
+            format!("PeerLeft(peer={peer_id}, session={session_id})")
+        }
+        SignalMessage::Offer { from_peer_id, to_peer_id, nat, .. } => {
+            format!("Offer(from={from_peer_id}, to={to_peer_id}, nat={})", nat.is_some())
+        }
+        SignalMessage::Answer { from_peer_id, to_peer_id, .. } => {
+            format!("Answer(from={from_peer_id}, to={to_peer_id})")
+        }
+        SignalMessage::IceCandidate { from_peer_id, to_peer_id, candidate, .. } => {
+            format!("IceCandidate(from={from_peer_id}, to={to_peer_id}, cand={candidate:?})")
+        }
+        SignalMessage::Error { message } => format!("Error({message})"),
+    }
+}
 
 use crate::state::{AppState, PeerHandle};
 
@@ -114,6 +143,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                 // wire format already carries peer_id/session_id per-message, so
                 // we simply route whatever was sent through the shared state.
                 let is_leave = matches!(&other, SignalMessage::LeaveSession { .. });
+                info!("RECV {}", signal_label(&other));
 
                 let routed = {
                     let mut signaling = state.signaling.lock().expect("signaling mutex poisoned");
@@ -145,6 +175,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     // and haven't already left it, synthesize a LeaveSession so the other
     // peer(s) reliably get PeerLeft.
     if let Some(JoinedPeer { peer_id, session_id }) = joined {
+        info!("DISCONNECT peer={peer_id} session={session_id}");
         state.peers.lock().expect("peers mutex poisoned").remove(&peer_id);
 
         let routed = {
@@ -193,6 +224,7 @@ async fn do_join(
     peer_id: String,
     session_id: String,
 ) -> Result<(), plenum::signaling::SignalingError> {
+    info!("JOIN peer={peer_id} session={session_id}");
     // Register the peer's outbound handle before routing, so that if another
     // peer's notification races in concurrently it can find us. (The
     // signaling mutex serializes this against concurrent handle() calls
@@ -233,6 +265,10 @@ async fn do_join(
         signaling.peers_in_session(&session_id).unwrap_or_default()
     };
 
+    info!(
+        "JOIN peer={peer_id} session={session_id} existing_in_room={}",
+        existing_peers.len()
+    );
     for other_peer_id in existing_peers {
         if other_peer_id == peer_id {
             continue;
@@ -254,6 +290,11 @@ async fn do_join(
 /// drops the message rather than erroring the connection.
 async fn route_signals(state: &Arc<AppState>, signals: Vec<RoutedSignal>) {
     for signal in signals {
+        info!(
+            "RELAY {} -> {}",
+            signal_label(&signal.message),
+            signal.recipient_peer_id
+        );
         let handle = state
             .peers
             .lock()

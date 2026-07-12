@@ -41,6 +41,10 @@ pub async fn turn_credentials_handler(
     Query(query): Query<TurnCredentialsQuery>,
 ) -> impl IntoResponse {
     let Some(secret) = state.turn_secret.as_ref() else {
+        tracing::warn!(
+            "TURN creds requested by peer={} but TURN_SHARED_SECRET is unset -> 404 (STUN-only)",
+            query.peer_id
+        );
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({
@@ -85,6 +89,13 @@ pub async fn turn_credentials_handler(
         urls: state.turn_urls.clone(),
         ttl_secs: TTL_SECS,
     };
+
+    tracing::info!(
+        "TURN creds issued peer={} urls={:?} ttl={}s",
+        query.peer_id,
+        response.urls,
+        TTL_SECS
+    );
 
     Json(response).into_response()
 }

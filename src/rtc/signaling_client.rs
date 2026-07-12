@@ -13,7 +13,9 @@ use webrtc::api::APIBuilder;
 use webrtc::data_channel::data_channel_init::RTCDataChannelInit;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
+use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
 use webrtc::interceptor::registry::Registry;
+use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
@@ -145,6 +147,22 @@ fn wire_ice_candidate_outbound(
     }));
 }
 
+/// TEMP DIAG: log ICE and peer-connection state transitions to stderr so we can
+/// see whether the internet-mode connection actually reaches (and stays in) a
+/// connected state, or drops after the data channel opens.
+fn wire_state_logging(peer_connection: &Arc<RTCPeerConnection>, role: &'static str) {
+    peer_connection.on_ice_connection_state_change(Box::new(move |state: RTCIceConnectionState| {
+        eprintln!("DIAG {role}: ice_connection_state -> {state:?}");
+        Box::pin(async {})
+    }));
+    peer_connection.on_peer_connection_state_change(Box::new(
+        move |state: RTCPeerConnectionState| {
+            eprintln!("DIAG {role}: peer_connection_state -> {state:?}");
+            Box::pin(async {})
+        },
+    ));
+}
+
 /// Connect to the relay as the **offerer** (sender role): join the session, wait
 /// for `PeerJoined` (either a genuine new peer or the relay's synthesized
 /// already-present-peer notification) to learn the answerer's peer id, create the
@@ -189,6 +207,7 @@ pub async fn run_offerer(
         my_peer_id.to_string(),
         Arc::clone(&remote_peer_id),
     );
+    wire_state_logging(&peer_connection, "offerer");
 
     // Spawn the outbound WS drain task: forwards locally-generated SignalMessages
     // (currently just ICE candidates; offer/answer are sent inline below) to the
@@ -364,6 +383,7 @@ pub async fn run_answerer(
         my_peer_id.to_string(),
         Arc::clone(&remote_peer_id),
     );
+    wire_state_logging(&peer_connection, "answerer");
 
     // Register on_data_channel BEFORE set_remote_description, so it reliably
     // fires when the offerer's channel arrives during negotiation.

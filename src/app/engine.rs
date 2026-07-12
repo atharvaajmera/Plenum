@@ -14,7 +14,7 @@ use crate::app::error::AppError;
 use crate::app::types::{
     PlenumEvent, BenchmarkEvent, BenchmarkIterationSummary, BenchmarkRequest, BenchmarkSummary,
     ConnectionState, CorePermissions, DiscoverRequest, DiscoveryEvent, DiscoverySummary, EventSink,
-    PermissionKind, ReceiveRemoteRequest, ReceiveRequest, SendRemoteRequest, SendRequest,
+    LogLevel, PermissionKind, ReceiveRemoteRequest, ReceiveRequest, SendRemoteRequest, SendRequest,
     TransferDirection, TransferEvent, TransferSummary,
 };
 use crate::discovery::{Beacon, PairingToken};
@@ -636,6 +636,18 @@ fn run_send_transfer<T: Transport, S: EventSink>(
     let mut buffer = vec![0u8; options.chunk_size];
     let mut bytes_acked = resume_bytes;
 
+    // TEMP DIAG: instrumentation to diagnose the internet-mode stall.
+    let mut diag_acks_recv: u64 = 0;
+    let mut diag_data_sent: u64 = 0;
+    let mut diag_last = now_ms();
+    sink.emit(PlenumEvent::Log {
+        level: LogLevel::Info,
+        message: format!(
+            "DIAG send: transfer loop start, file={file_name} size={file_size} chunk={} window={}",
+            options.chunk_size, options.window_size
+        ),
+    });
+
     loop {
         let now = now_ms();
         while !file_done && sender.pending_len() < options.window_size * 2 {
@@ -654,6 +666,7 @@ fn run_send_transfer<T: Transport, S: EventSink>(
         while let Some(frame) = transport.recv()? {
             let control = parse_packet(&frame)?;
             if control.packet_type == PacketType::Ack {
+                diag_acks_recv = diag_acks_recv.saturating_add(1);
                 if let Some(size) = ack_sizes.remove(&control.sequence_no) {
                     bytes_acked = bytes_acked.saturating_add(size as u64);
                     sink.emit(PlenumEvent::Transfer(TransferEvent::Progress {
@@ -667,7 +680,21 @@ fn run_send_transfer<T: Transport, S: EventSink>(
         }
 
         sender.retransmit_due(transport, now)?;
-        sender.send_available(transport, now)?;
+        diag_data_sent = diag_data_sent.saturating_add(sender.send_available(transport, now)? as u64);
+
+        // TEMP DIAG: heartbeat every ~1s so we can see whether data leaves and
+        // whether ACKs ever come back.
+        if now.saturating_sub(diag_last) >= 1000 {
+            diag_last = now;
+            sink.emit(PlenumEvent::Log {
+                level: LogLevel::Info,
+                message: format!(
+                    "DIAG send: data_sent={diag_data_sent} acks_recv={diag_acks_recv} bytes_acked={bytes_acked} in_flight={} pending={} seq_next={sequence_no}",
+                    sender.in_flight_len(),
+                    sender.pending_len()
+                ),
+            });
+        }
 
         if file_done && sender.is_empty() {
             break;
@@ -675,6 +702,13 @@ fn run_send_transfer<T: Transport, S: EventSink>(
 
         thread::sleep(Duration::from_millis(1));
     }
+
+    sink.emit(PlenumEvent::Log {
+        level: LogLevel::Info,
+        message: format!(
+            "DIAG send: transfer loop END data_sent={diag_data_sent} acks_recv={diag_acks_recv} bytes_acked={bytes_acked}"
+        ),
+    });
 
     transport.send(&encode_packet(&Packet::new(
         PacketType::Finish,
@@ -723,7 +757,31 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
     let mut checkpoint_path: Option<PathBuf> = None;
     let mut peak_receiver_buffered = 0usize;
 
+    // TEMP DIAG: instrumentation to diagnose the internet-mode stall.
+    let mut diag_data_recv: u64 = 0;
+    let mut diag_acks_sent: u64 = 0;
+    let mut diag_frames: u64 = 0;
+    let mut diag_last = now_ms();
+    sink.emit(PlenumEvent::Log {
+        level: LogLevel::Info,
+        message: "DIAG recv: transfer loop start, waiting for packets".to_string(),
+    });
+
     loop {
+        // TEMP DIAG: heartbeat every ~1s, even while idle, so we can see whether
+        // ANY packet ever reaches the receiver.
+        let diag_now = now_ms();
+        if diag_now.saturating_sub(diag_last) >= 1000 {
+            diag_last = diag_now;
+            sink.emit(PlenumEvent::Log {
+                level: LogLevel::Info,
+                message: format!(
+                    "DIAG recv: frames={diag_frames} data_recv={diag_data_recv} acks_sent={diag_acks_sent} bytes_recv={bytes_received} next_expected={}",
+                    receiver.next_expected()
+                ),
+            });
+        }
+
         let frame = match transport.recv() {
             Ok(Some(frame)) => frame,
             Ok(None) => continue,
@@ -734,6 +792,7 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
                 return Err(error.into());
             }
         };
+        diag_frames = diag_frames.saturating_add(1);
 
         let packet = parse_packet(&frame)?;
         match packet.packet_type {
@@ -777,6 +836,14 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
                     resumed_bytes: resume_bytes,
                 }));
 
+                // TEMP DIAG
+                sink.emit(PlenumEvent::Log {
+                    level: LogLevel::Info,
+                    message: format!(
+                        "DIAG recv: START received file={file_name} size={file_size} resume={resume_bytes}"
+                    ),
+                });
+
                 if resume_bytes > 0 {
                     sink.emit(PlenumEvent::Transfer(TransferEvent::Resumed {
                         direction: TransferDirection::Receive,
@@ -791,8 +858,12 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
                 }
             }
             PacketType::Data => {
+                diag_data_recv = diag_data_recv.saturating_add(1);
                 let controls = receiver.receive_data_packet(packet)?;
                 for control in controls {
+                    if control.packet_type == PacketType::Ack {
+                        diag_acks_sent = diag_acks_sent.saturating_add(1);
+                    }
                     transport.send(&encode_packet(&control)?)?;
                 }
 
@@ -837,6 +908,14 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
             _ => {}
         }
     }
+
+    // TEMP DIAG
+    sink.emit(PlenumEvent::Log {
+        level: LogLevel::Info,
+        message: format!(
+            "DIAG recv: transfer loop END frames={diag_frames} data_recv={diag_data_recv} acks_sent={diag_acks_sent} bytes_recv={bytes_received}"
+        ),
+    });
 
     // Tolerant close: the sender may have already disconnected, so
     // closing an already-severed connection is expected and not fatal.
