@@ -1,16 +1,25 @@
 import React, { useState, useEffect } from "react";
-import { File, Folder, AlignLeft, ClipboardPaste, RefreshCcw, Monitor, Heart, Settings, Wifi, Globe } from "lucide-react";
+import { File, RefreshCcw, Monitor, Wifi, Globe } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
-import { PlenumEvent, DiscoverRequest, DiscoverySummary, SendRequest, SendRemoteRequest, TransferSummary } from "../types/rust";
-import { useSettings } from "../context/SettingsContext";
+import { PlenumEvent, DiscoverRequest, DiscoverySummary, SendRequest, SendRemoteRequest, TransferSummary, IceServer } from "../types/rust";
+import { RELAY_SERVER_URL, DEFAULT_ICE_SERVERS } from "../config";
+
+const STATE_LABELS: Record<string, string> = {
+  Discovering: "Searching for devices...",
+  Listening: "Ready to send files",
+  Connecting: "Connecting to device...",
+  SignalingConnected: "Connecting to device...",
+  NegotiatingIce: "Establishing connection...",
+  Connected: "Connected to device...",
+};
+
+const friendlyState = (state: string): string => STATE_LABELS[state] ?? "Connecting to device...";
 
 const SendPage: React.FC = () => {
-  const { settings } = useSettings();
   const [mode, setMode] = useState<"local" | "internet">("local");
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
-  const [selectionType, setSelectionType] = useState<"file" | "folder" | "text" | "paste" | null>(null);
   const [peers, setPeers] = useState<DiscoverySummary[]>([]);
   const [isDiscovering, setIsDiscovering] = useState(false);
   const [transferStatus, setTransferStatus] = useState<string>("");
@@ -57,7 +66,7 @@ const SendPage: React.FC = () => {
            const trans = payload.Transfer;
             if ("StateChanged" in trans) {
               if (trans.StateChanged.state !== "Closed") {
-                setTransferStatus(trans.StateChanged.state === "Connected" ? "Connected to device..." : trans.StateChanged.state);
+                setTransferStatus(friendlyState(trans.StateChanged.state));
               }
            } else if ("Started" in trans) {
              setTransferStatus(`Sending ${trans.Started.file_name}...`);
@@ -74,7 +83,6 @@ const SendPage: React.FC = () => {
       const unlistenDrop = await listen<{ paths: string[] }>('tauri://drag-drop', (event) => {
         if (event.payload.paths.length > 0) {
           setSelectedPath(event.payload.paths[0]);
-          setSelectionType("file");
         }
         setIsDragging(false);
       });
@@ -156,12 +164,18 @@ const SendPage: React.FC = () => {
 
     try {
       const myPeerId = await invoke<string>("generate_peer_id_command");
+      const iceServers: IceServer[] = [...DEFAULT_ICE_SERVERS];
+      const turn = await invoke<IceServer | null>("fetch_turn_credentials_command", {
+        relayServerUrl: RELAY_SERVER_URL,
+        peerId: myPeerId,
+      });
+      if (turn) iceServers.push(turn);
       const req: SendRemoteRequest = {
         file_path: selectedPath!,
-        relay_server_url: settings.internet.relayServerUrl,
+        relay_server_url: RELAY_SERVER_URL,
         session_id: roomCodeInput.trim().toUpperCase(),
         my_peer_id: myPeerId,
-        ice_servers: settings.internet.iceServers.map(s => ({ urls: [s.urls], username: s.username, credential: s.credential })),
+        ice_servers: iceServers,
         connect_timeout_secs: 30,
         permissions: { local_network: true, file_system_read: true, file_system_write: true, background_transfer: false },
         options: { chunk_size: 32768, window_size: 128, timeout_ticks: 1000 }
@@ -182,33 +196,10 @@ const SendPage: React.FC = () => {
       const selected = await open({ multiple: false, directory: false });
       if (selected && !Array.isArray(selected)) {
         setSelectedPath(selected);
-        setSelectionType("file");
       }
     } catch (err) {
       console.error(err);
     }
-  };
-
-  const handleSelectFolder = async () => {
-    try {
-      const selected = await open({ multiple: false, directory: true });
-      if (selected && !Array.isArray(selected)) {
-        setSelectedPath(selected);
-        setSelectionType("folder");
-      }
-    } catch (err) {
-      console.error(err);
-    }
-  };
-
-  const handleSelectText = () => {
-    setSelectionType("text");
-    setSelectedPath("Text Input selected");
-  };
-
-  const handleSelectPaste = async () => {
-    setSelectionType("paste");
-    setSelectedPath("Clipboard Content selected");
   };
   return (
     <div style={{ position: "relative", height: "100%" }}>
@@ -242,30 +233,14 @@ const SendPage: React.FC = () => {
       </div>
 
       <div className="card-section">
-        <h2 className="section-title">Selection</h2>
-        <div className="card-grid">
-          <div className="action-card" onClick={handleSelectFile} style={{ borderColor: selectionType === "file" ? "var(--accent-primary)" : "var(--border-color)" }}>
-            <File size={28} />
-            <span>File</span>
-          </div>
-          <div className="action-card" onClick={handleSelectFolder} style={{ borderColor: selectionType === "folder" ? "var(--accent-primary)" : "var(--border-color)" }}>
-            <Folder size={28} />
-            <span>Folder</span>
-          </div>
-          <div className="action-card" onClick={handleSelectText} style={{ borderColor: selectionType === "text" ? "var(--accent-primary)" : "var(--border-color)" }}>
-            <AlignLeft size={28} />
-            <span>Text</span>
-          </div>
-          <div className="action-card" onClick={handleSelectPaste} style={{ borderColor: selectionType === "paste" ? "var(--accent-primary)" : "var(--border-color)" }}>
-            <ClipboardPaste size={28} />
-            <span>Paste</span>
-          </div>
+        <h2 className="section-title">File</h2>
+        <div className="action-card" onClick={handleSelectFile} style={{ borderColor: selectedPath ? "var(--accent-primary)" : "var(--border-color)", padding: "32px" }}>
+          <File size={28} />
+          <span>{selectedPath ? selectedPath.split(/[/\\]/).pop() : "Select a file to send"}</span>
         </div>
-        {selectedPath && (
-          <div style={{ marginTop: "12px", fontSize: "13px", color: "var(--text-secondary)" }}>
-            Selected: <span style={{ color: "var(--text-primary)" }}>{selectedPath.split(/[/\\]/).pop()}</span>
-          </div>
-        )}
+        <div style={{ marginTop: "8px", fontSize: "12px", color: "var(--text-secondary)", textAlign: "center" }}>
+          or drag &amp; drop a file anywhere
+        </div>
       </div>
 
       {mode === "internet" && (
@@ -403,7 +378,6 @@ const SendPage: React.FC = () => {
         )}
 
         <div style={{ marginTop: "40px", textAlign: "center" }}>
-          <span style={{ fontSize: "14px", color: "var(--accent-primary)", cursor: "pointer", fontWeight: 500 }}>Troubleshoot</span>
           <p style={{ fontSize: "13px", color: "var(--text-secondary)", marginTop: "16px" }}>
             Please ensure that the desired target is also on the same Wi-Fi network.
           </p>

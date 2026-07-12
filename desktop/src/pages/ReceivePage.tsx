@@ -3,8 +3,20 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { downloadDir } from "@tauri-apps/api/path";
 import { Copy, Check, Wifi, Globe } from "lucide-react";
-import { PlenumEvent, ReceiveRequest, ReceiveRemoteRequest, TransferSummary } from "../types/rust";
+import { PlenumEvent, ReceiveRequest, ReceiveRemoteRequest, TransferSummary, IceServer } from "../types/rust";
 import { useSettings } from "../context/SettingsContext";
+import { RELAY_SERVER_URL, DEFAULT_ICE_SERVERS } from "../config";
+
+const STATE_LABELS: Record<string, string> = {
+  Discovering: "Searching...",
+  Listening: "Ready to receive files",
+  Connecting: "Connecting to device...",
+  SignalingConnected: "Connecting to device...",
+  NegotiatingIce: "Establishing connection...",
+  Connected: "Connected to device...",
+};
+
+const friendlyState = (state: string): string => STATE_LABELS[state] ?? "Connecting to device...";
 
 const ReceivePage: React.FC = () => {
   const [mode, setMode] = useState<"local" | "internet">("local");
@@ -69,7 +81,7 @@ const ReceivePage: React.FC = () => {
                 } else if (trans.StateChanged.state === "Connected") {
                   setStatus("Connected to device...");
                 } else {
-                  setStatus(trans.StateChanged.state);
+                  setStatus(friendlyState(trans.StateChanged.state));
                 }
               }
            } else if ("Started" in trans) {
@@ -129,7 +141,7 @@ const ReceivePage: React.FC = () => {
                 if (trans.StateChanged.state === "Connected") {
                   setStatus("Connected to device...");
                 } else {
-                  setStatus(trans.StateChanged.state);
+                  setStatus(friendlyState(trans.StateChanged.state));
                 }
               }
            } else if ("Started" in trans) {
@@ -152,21 +164,23 @@ const ReceivePage: React.FC = () => {
       if (cancelled) return;
       setRoomCode(code);
 
-      if (!settings.internet.relayServerUrl) {
-        setStatus("Set a Relay Server URL in Settings first");
-        return;
-      }
-
       setStatus("Waiting for sender...");
 
       const downloadsPath = await downloadDir();
 
+      const iceServers: IceServer[] = [...DEFAULT_ICE_SERVERS];
+      const turn = await invoke<IceServer | null>("fetch_turn_credentials_command", {
+        relayServerUrl: RELAY_SERVER_URL,
+        peerId: myPeerId,
+      });
+      if (turn) iceServers.push(turn);
+
       const req: ReceiveRemoteRequest = {
         output_dir: downloadsPath,
-        relay_server_url: settings.internet.relayServerUrl,
+        relay_server_url: RELAY_SERVER_URL,
         session_id: code,
         my_peer_id: myPeerId,
-        ice_servers: settings.internet.iceServers.map(s => ({ urls: [s.urls], username: s.username, credential: s.credential })),
+        ice_servers: iceServers,
         connect_timeout_secs: 30,
         permissions: { local_network: true, file_system_read: true, file_system_write: true, background_transfer: false },
         options: { chunk_size: 32768, window_size: 128, timeout_ticks: 1000 }

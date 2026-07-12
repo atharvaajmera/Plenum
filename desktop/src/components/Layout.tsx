@@ -63,7 +63,7 @@ const Layout: React.FC = () => {
             }}>
               <div style={{ fontSize: "14px", fontWeight: 600, marginBottom: "12px", color: "var(--text-primary)" }}>How to use Plenum?</div>
               <div style={{ fontSize: "13px", color: "var(--text-secondary)", lineHeight: 1.5 }}>
-                <strong style={{ color: "var(--text-primary)" }}>To Send:</strong> Select a file or folder, then choose a nearby device to securely transfer it over your local network.
+                <strong style={{ color: "var(--text-primary)" }}>To Send:</strong> Select a file, then choose a nearby device to securely transfer it over your local network.
                 <br /><br />
                 <strong style={{ color: "var(--text-primary)" }}>To Receive:</strong> Stay on the Receive screen to be discoverable. Accept the incoming transfer when prompted.
                 <br /> <br />
