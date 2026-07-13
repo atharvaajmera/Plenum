@@ -70,6 +70,8 @@ automatically):
 ```
 TURN_SHARED_SECRET=$(openssl rand -hex 32)
 CADDY_DOMAIN=relay.example.com
+TURN_PUBLIC_IP=<this host's public/Elastic IP>
+TURN_PRIVATE_IP=<this host's private IP, e.g. from `hostname -I`>
 ```
 
 - `TURN_SHARED_SECRET`: generate with `openssl rand -hex 32`. Shared between
@@ -78,6 +80,15 @@ CADDY_DOMAIN=relay.example.com
 - `CADDY_DOMAIN`: a DNS name that already points at this host's public IP.
   Caddy uses it both to request a Let's Encrypt certificate and to know
   which `Host` header to route.
+- `TURN_PUBLIC_IP` / `TURN_PRIVATE_IP`: **required on any host behind NAT
+  (EC2, most cloud VMs).** Without these, coturn auto-discovers all local
+  addresses and may advertise the private IP as a relay candidate — clients
+  outside the VPC can never reach it, so TURN relay fallback silently fails
+  for peers on genuinely separate networks (same-LAN or lucky-NAT transfers
+  will still appear to work, masking the bug). `TURN_PRIVATE_IP` is what
+  coturn binds/relays on internally; `TURN_PUBLIC_IP` is what it reports to
+  clients in candidate strings. On EC2 find these with `hostname -I` (private)
+  and the console's "Public IPv4 address" / an Elastic IP (public).
 
 `.env` is already covered by the repo's root `.gitignore` (`.env` /
 `.env.*`) — do not commit your real secret.
@@ -119,6 +130,9 @@ coturn:
     - "--use-auth-secret"
     - "--static-auth-secret=${TURN_SHARED_SECRET}"
     - "--realm=plenum.local"
+    - "--listening-ip=${TURN_PRIVATE_IP}"
+    - "--relay-ip=${TURN_PRIVATE_IP}"
+    - "--external-ip=${TURN_PUBLIC_IP}/${TURN_PRIVATE_IP}"
     - "--min-port=49152"
     - "--max-port=49452"
 ```
@@ -142,6 +156,12 @@ unlike a typical single-port service.
 6. Repeat with one peer behind a **symmetric NAT** (e.g. carrier-grade
    mobile NAT) to confirm the TURN relay fallback actually engages — check
    coturn's logs for an allocation, not just STUN binding success.
+7. Check the `typ relay` candidate strings exchanged in `relay-server`'s
+   logs — they must show `TURN_PUBLIC_IP`, never `TURN_PRIVATE_IP`. Same-NAT
+   tests (both peers behind the same router/carrier) can complete via a
+   direct `srflx`/`host` pair even when the relay candidate is broken and
+   unreachable, silently masking this bug — genuinely separate networks are
+   the only real test.
 
 ## Testing
 

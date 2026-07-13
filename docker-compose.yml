@@ -31,14 +31,19 @@ services:
       - "--use-auth-secret"
       - "--static-auth-secret=${TURN_SHARED_SECRET}"
       - "--realm=plenum.local"
+      # Without these, coturn auto-discovers every local address (including
+      # the EC2 private IP and docker bridge IPs like 172.17-19.x.x.x) and
+      # hands out relay candidates on whichever one it picked -- often the
+      # private IP, which no client outside the VPC can ever reach. Pin
+      # listening/relay to the private IP, and tell coturn to report the
+      # public IP in RELAYED-ADDRESS/candidate strings instead (standard
+      # AWS 1:1 NAT: traffic to the public IP arrives on the private
+      # interface transparently, so this mapping just needs to be declared).
+      - "--listening-ip=${TURN_PRIVATE_IP}"
+      - "--relay-ip=${TURN_PRIVATE_IP}"
+      - "--external-ip=${TURN_PUBLIC_IP}/${TURN_PRIVATE_IP}"
       - "--min-port=49152"
       - "--max-port=49452"
-      # TEMP DIAG: log to stdout + verbose so `docker compose logs coturn` shows
-      # TURN allocations and relayed traffic (confirms whether media actually
-      # uses the relay when direct P2P fails).
-      - "--log-file=stdout"
-      - "--simple-log"
-      - "--verbose"
 
   caddy:
     image: caddy:2
