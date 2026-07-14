@@ -19,6 +19,9 @@ pub enum AppError {
         operation: &'static str,
     },
     InvalidRequest(String),
+    /// The transfer made no observable progress for longer than the watchdog
+    /// allows (e.g. the peer went half-open and packets stopped flowing).
+    Stalled(String),
     Discovery(DiscoveryError),
     Flow(FlowError),
     Protocol(ProtocolError),
@@ -38,6 +41,7 @@ impl fmt::Display for AppError {
                 operation,
             } => write!(f, "permission {permission:?} is required for {operation}"),
             Self::InvalidRequest(message) => write!(f, "invalid request: {message}"),
+            Self::Stalled(message) => write!(f, "transfer stalled: {message}"),
             Self::Discovery(error) => write!(f, "discovery error: {error}"),
             Self::Flow(error) => write!(f, "flow error: {error}"),
             Self::Protocol(error) => write!(f, "protocol error: {error}"),

@@ -13,6 +13,20 @@ use crate::rtc::signaling_client::{run_answerer, run_offerer, ConnectedChannel};
 use crate::signaling::IceServer;
 use crate::transport::{Transport, TransportError, TransportResult};
 
+/// Max packets queued between `Transport::send` and the background send loop.
+/// Bounded so a retransmission storm can't pile megabytes of stale duplicates
+/// into the queue (which then all have to drain over SCTP before `close()`
+/// returns — the "stuck at 100%" failure). When full, `send` blocks the engine
+/// thread briefly, which is exactly the backpressure the window loop needs.
+const OUTBOUND_QUEUE_PACKETS: usize = 64;
+
+/// SCTP buffered-amount watermarks. The background loop stops handing packets
+/// to the data channel once `buffered_amount` exceeds the high watermark and
+/// resumes below the low watermark, keeping end-to-end queueing (and thus the
+/// window loop's view of "sent") close to what's actually on the wire.
+const BUFFERED_HIGH_WATERMARK: usize = 1024 * 1024;
+const BUFFERED_LOW_WATERMARK: usize = 256 * 1024;
+
 /// A `Transport` implementation over a WebRTC data channel.
 ///
 /// Owns one dedicated OS thread running a `current_thread` tokio runtime, which
@@ -21,8 +35,9 @@ use crate::transport::{Transport, TransportError, TransportResult};
 /// matching `TcpTransport`'s non-blocking polling contract.
 pub struct RtcTransport {
     inbound_rx: std_mpsc::Receiver<Vec<u8>>,
-    outbound_tx: mpsc::UnboundedSender<Vec<u8>>,
+    outbound_tx: mpsc::Sender<Vec<u8>>,
     shutdown_tx: Option<oneshot::Sender<()>>,
+    diag_rx: std_mpsc::Receiver<String>,
     runtime: Option<BackgroundRuntime>,
     closed: bool,
 }
@@ -31,9 +46,10 @@ pub struct RtcTransport {
 /// the constructing thread over a std (non-tokio) channel.
 enum ConnectOutcome {
     Connected {
-        outbound_tx: mpsc::UnboundedSender<Vec<u8>>,
+        outbound_tx: mpsc::Sender<Vec<u8>>,
         shutdown_tx: oneshot::Sender<()>,
         inbound_rx: std_mpsc::Receiver<Vec<u8>>,
+        diag_rx: std_mpsc::Receiver<String>,
     },
     Failed(RtcError),
 }
@@ -98,6 +114,8 @@ impl RtcTransport {
                 peer_connection,
                 data_channel,
                 inbound_rx,
+                diag_tx,
+                diag_rx,
             } = match connected {
                 Ok(connected) => connected,
                 Err(error) => {
@@ -106,7 +124,7 @@ impl RtcTransport {
                 }
             };
 
-            let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+            let (outbound_tx, mut outbound_rx) = mpsc::channel::<Vec<u8>>(OUTBOUND_QUEUE_PACKETS);
             let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
 
             if outcome_tx
@@ -114,6 +132,7 @@ impl RtcTransport {
                     outbound_tx,
                     shutdown_tx,
                     inbound_rx,
+                    diag_rx,
                 })
                 .is_err()
             {
@@ -131,37 +150,67 @@ impl RtcTransport {
             // branches are ready and a random pick can observe shutdown first,
             // dropping the final `Finish` packet — leaving the receiver stuck at
             // 100% having never seen end-of-transfer.
+            let mut shutdown_requested = false;
             loop {
                 tokio::select! {
                     biased;
                     maybe_bytes = outbound_rx.recv() => {
                         match maybe_bytes {
                             Some(bytes) => {
-                                if data_channel.send(&Bytes::from(bytes)).await.is_err() {
+                                // Watermark pacing: don't stack packets onto an
+                                // already-deep SCTP send buffer; wait for it to
+                                // drain below the low watermark first. Keeps
+                                // wire latency honest so the retransmit timer
+                                // doesn't fire on packets that are merely
+                                // queued, not lost.
+                                if data_channel.buffered_amount().await >= BUFFERED_HIGH_WATERMARK {
+                                    while !shutdown_requested
+                                        && data_channel.buffered_amount().await > BUFFERED_LOW_WATERMARK
+                                    {
+                                        tokio::select! {
+                                            _ = tokio::time::sleep(Duration::from_millis(5)) => {}
+                                            _ = &mut shutdown_rx => {
+                                                shutdown_requested = true;
+                                            }
+                                        }
+                                    }
+                                }
+                                if let Err(error) = data_channel.send(&Bytes::from(bytes)).await {
+                                    let _ = diag_tx.send(format!(
+                                        "DIAG transport: data_channel.send failed mid-transfer: {error}"
+                                    ));
+                                    break;
+                                }
+                                if shutdown_requested {
                                     break;
                                 }
                             }
                             None => break,
                         }
                     }
-                    _ = &mut shutdown_rx => {
+                    _ = &mut shutdown_rx, if !shutdown_requested => {
                         break;
                     }
                 }
             }
 
-            // Graceful close: flush anything still queued, then wait for the
-            // SCTP send buffer to drain so the peer actually receives the final
-            // bytes (e.g. the `Finish` packet) before we tear the connection
-            // down. webrtc-rs's `close()` is abrupt and discards buffered data.
+            // Graceful close: flush anything still queued (bounded — the
+            // outbound channel holds at most OUTBOUND_QUEUE_PACKETS packets),
+            // then wait for the SCTP send buffer to drain so the peer actually
+            // receives the final bytes (e.g. the `Finish` packet) before we
+            // tear the connection down. webrtc-rs's `close()` is abrupt and
+            // discards buffered data.
             while let Ok(bytes) = outbound_rx.try_recv() {
-                if data_channel.send(&Bytes::from(bytes)).await.is_err() {
+                if let Err(error) = data_channel.send(&Bytes::from(bytes)).await {
+                    let _ = diag_tx.send(format!(
+                        "DIAG transport: data_channel.send failed during close-flush: {error}"
+                    ));
                     break;
                 }
             }
-            // Bounded wait (~2s) for the send buffer to empty. Ordered/reliable
+            // Bounded wait (~5s) for the send buffer to empty. Ordered/reliable
             // SCTP guarantees delivery once buffered_amount reaches zero.
-            for _ in 0..200 {
+            for _ in 0..500 {
                 if data_channel.buffered_amount().await == 0 {
                     break;
                 }
@@ -180,10 +229,12 @@ impl RtcTransport {
                 outbound_tx,
                 shutdown_tx,
                 inbound_rx,
+                diag_rx,
             } => Ok(Self {
                 inbound_rx,
                 outbound_tx,
                 shutdown_tx: Some(shutdown_tx),
+                diag_rx,
                 runtime: Some(runtime),
                 closed: false,
             }),
@@ -200,8 +251,11 @@ impl Transport for RtcTransport {
         if self.closed {
             return Err(TransportError::Closed);
         }
+        // Bounded queue: blocks the (synchronous) engine thread when the
+        // background loop is paced on SCTP buffered_amount — this is the
+        // backpressure that stops retransmission storms from snowballing.
         self.outbound_tx
-            .send(bytes.to_vec())
+            .blocking_send(bytes.to_vec())
             .map_err(|_| TransportError::Closed)
     }
 
@@ -232,6 +286,14 @@ impl Transport for RtcTransport {
 
     fn is_closed(&self) -> bool {
         self.closed
+    }
+
+    fn poll_diagnostics(&mut self) -> Vec<String> {
+        let mut diagnostics = Vec::new();
+        while let Ok(message) = self.diag_rx.try_recv() {
+            diagnostics.push(message);
+        }
+        diagnostics
     }
 }
 

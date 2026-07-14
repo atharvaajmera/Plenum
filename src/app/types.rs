@@ -56,7 +56,13 @@ impl Default for TransferOptions {
         Self {
             chunk_size: 32 * 1024,
             window_size: 128,
-            timeout_ticks: 1000,
+            // Milliseconds before an unacknowledged packet is retransmitted.
+            // Deliberately generous: the WebRTC data channel is already
+            // reliable/ordered, so retransmission at this layer only matters
+            // for genuinely lost connections. An aggressive value (e.g. 1s)
+            // fires on packets that are merely queued in SCTP, snowballing
+            // into a duplicate storm that stalls the transfer.
+            timeout_ticks: 15_000,
         }
     }
 }

@@ -18,4 +18,12 @@ pub trait Transport {
     fn recv(&mut self) -> TransportResult<Option<Vec<u8>>>;
     fn close(&mut self) -> TransportResult<()>;
     fn is_closed(&self) -> bool;
+
+    /// Drains any out-of-band diagnostic messages the transport has queued
+    /// since the last call (e.g. ICE connection state changes, candidate-pair
+    /// stats). Most transports have nothing to report; `RtcTransport` is the
+    /// only implementor that overrides this.
+    fn poll_diagnostics(&mut self) -> Vec<String> {
+        Vec::new()
+    }
 }

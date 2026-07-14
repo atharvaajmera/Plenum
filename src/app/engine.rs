@@ -27,6 +27,16 @@ use crate::transport::{MemoryTransport, MemoryTransportConfig, TcpTransport, Tra
 
 const RESUME_NEGOTIATION_TIMEOUT: Duration = Duration::from_millis(250);
 
+/// Sender watchdog: abort if packets are awaiting acknowledgement but nothing
+/// has arrived from the receiver for this long. A healthy receiver ACKs every
+/// data packet, so prolonged silence means the connection is dead/half-open.
+const SEND_STALL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Receiver watchdog: abort if no frames at all arrive for this long.
+/// Longer than the sender's timeout so the sender aborts first and the
+/// receiver's checkpoint stays valid for resume.
+const RECEIVE_STALL_TIMEOUT: Duration = Duration::from_secs(45);
+
 #[derive(Debug, Default)]
 pub struct PlenumCore {
     signaling: SignalingState,
@@ -635,6 +645,7 @@ fn run_send_transfer<T: Transport, S: EventSink>(
     let mut file_done = resume_bytes >= file_size;
     let mut buffer = vec![0u8; options.chunk_size];
     let mut bytes_acked = resume_bytes;
+    let mut last_inbound = Instant::now();
 
     // TEMP DIAG: instrumentation to diagnose the internet-mode stall.
     let mut diag_acks_recv: u64 = 0;
@@ -664,6 +675,7 @@ fn run_send_transfer<T: Transport, S: EventSink>(
         }
 
         while let Some(frame) = transport.recv()? {
+            last_inbound = Instant::now();
             let control = parse_packet(&frame)?;
             if control.packet_type == PacketType::Ack {
                 diag_acks_recv = diag_acks_recv.saturating_add(1);
@@ -696,8 +708,27 @@ fn run_send_transfer<T: Transport, S: EventSink>(
             });
         }
 
+        for diag in transport.poll_diagnostics() {
+            sink.emit(PlenumEvent::Log {
+                level: LogLevel::Info,
+                message: diag,
+            });
+        }
+
         if file_done && sender.is_empty() {
             break;
+        }
+
+        // Watchdog: packets are awaiting ACKs but the receiver has gone
+        // silent — the connection is dead or half-open. Abort instead of
+        // spinning forever; the receiver's checkpoint allows a later resume.
+        if !sender.is_empty() && last_inbound.elapsed() >= SEND_STALL_TIMEOUT {
+            return Err(AppError::Stalled(format!(
+                "no packets from receiver for {}s ({} in flight, {} pending)",
+                SEND_STALL_TIMEOUT.as_secs(),
+                sender.in_flight_len(),
+                sender.pending_len()
+            )));
         }
 
         thread::sleep(Duration::from_millis(1));
@@ -762,6 +793,7 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
     let mut diag_acks_sent: u64 = 0;
     let mut diag_frames: u64 = 0;
     let mut diag_last = now_ms();
+    let mut last_frame_at = Instant::now();
     sink.emit(PlenumEvent::Log {
         level: LogLevel::Info,
         message: "DIAG recv: transfer loop start, waiting for packets".to_string(),
@@ -782,9 +814,31 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
             });
         }
 
+        for diag in transport.poll_diagnostics() {
+            sink.emit(PlenumEvent::Log {
+                level: LogLevel::Info,
+                message: diag,
+            });
+        }
+
         let frame = match transport.recv() {
-            Ok(Some(frame)) => frame,
-            Ok(None) => continue,
+            Ok(Some(frame)) => {
+                last_frame_at = Instant::now();
+                frame
+            }
+            Ok(None) => {
+                // Watchdog: nothing at all from the sender for too long —
+                // connection is dead or half-open. Abort; the checkpoint on
+                // disk allows a later resume.
+                if last_frame_at.elapsed() >= RECEIVE_STALL_TIMEOUT {
+                    return Err(AppError::Stalled(format!(
+                        "no packets from sender for {}s",
+                        RECEIVE_STALL_TIMEOUT.as_secs()
+                    )));
+                }
+                thread::sleep(Duration::from_millis(1));
+                continue;
+            }
             Err(error) => {
                 if transport.is_closed() {
                     break;

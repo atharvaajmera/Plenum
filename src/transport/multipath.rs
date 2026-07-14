@@ -171,4 +171,20 @@ impl Transport for MultipathTransport {
     fn is_closed(&self) -> bool {
         self.closed
     }
+
+    fn poll_diagnostics(&mut self) -> Vec<String> {
+        let mut diagnostics: Vec<String> = self
+            .local_path
+            .poll_diagnostics()
+            .into_iter()
+            .map(|msg| format!("[local] {msg}"))
+            .collect();
+        diagnostics.extend(
+            self.control_path
+                .poll_diagnostics()
+                .into_iter()
+                .map(|msg| format!("[control] {msg}")),
+        );
+        diagnostics
+    }
 }
