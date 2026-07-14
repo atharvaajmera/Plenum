@@ -68,7 +68,7 @@ class _SendScreenState extends State<SendScreen> {
       final event = jsonDecode(eventJson);
       if (event['Discovery'] != null) {
         final discEvent = event['Discovery'];
-        if (discEvent['PeerFound'] != null) {
+        if (discEvent is Map && discEvent['PeerFound'] != null) {
           setState(() {
             // Avoid duplicates
             if (!_peers.any((p) => p['token'] == discEvent['PeerFound']['token'])) {
