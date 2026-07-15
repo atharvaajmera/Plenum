@@ -10,7 +10,9 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message;
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
+use webrtc::api::setting_engine::SettingEngine;
 use webrtc::api::APIBuilder;
+use webrtc::ice::network_type::NetworkType;
 use webrtc::data_channel::data_channel_init::RTCDataChannelInit;
 use webrtc::data_channel::data_channel_state::RTCDataChannelState;
 use webrtc::data_channel::RTCDataChannel;
@@ -59,9 +61,20 @@ fn build_api() -> Result<webrtc::api::API, RtcError> {
     registry = register_default_interceptors(registry, &mut media_engine)
         .map_err(|error| RtcError::PeerConnection(error.to_string()))?;
 
+    // IPv4 only. Mobile-carrier IPv6 (observed on Jio) passes the small
+    // packets ICE and DTLS use for connectivity checks and handshakes but
+    // blackholes full-size data packets (path-MTU/filtering). ICE then
+    // nominates that poisoned host<->host IPv6 pair -- it "succeeded" -- and
+    // the transfer stalls at 0% with the relay never consulted. Over IPv4 the
+    // same phones fall back to srflx or the TURN relay, both of which carry
+    // bulk data.
+    let mut setting_engine = SettingEngine::default();
+    setting_engine.set_network_types(vec![NetworkType::Udp4]);
+
     Ok(APIBuilder::new()
         .with_media_engine(media_engine)
         .with_interceptor_registry(registry)
+        .with_setting_engine(setting_engine)
         .build())
 }
 

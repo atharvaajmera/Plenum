@@ -151,7 +151,11 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
       sessionId: code,
       myPeerId: myPeerId,
       iceServersJson: iceServersJson,
-      connectTimeoutSecs: BigInt.from(30),
+      // Generous: this clock starts the moment the room code is shown, and it
+      // has to cover the human on the other end reading the code, typing it,
+      // and picking a file. 30s reliably expired mid-negotiation, closing the
+      // peer connection right as the sender's data channel opened.
+      connectTimeoutSecs: BigInt.from(600),
     ).listen((eventJson) {
       final event = jsonDecode(eventJson);
       if (event['Log'] != null) {
