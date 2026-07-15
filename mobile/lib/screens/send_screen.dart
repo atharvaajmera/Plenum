@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:mobile/src/rust/api/plenum_api.dart';
 import '../config.dart';
 import '../services/internet_settings.dart';
@@ -56,7 +57,10 @@ class _SendScreenState extends State<SendScreen> {
     super.dispose();
   }
 
-  void _startDiscovery() {
+  void _startDiscovery() async {
+    await Permission.nearbyWifiDevices.request();
+    if (!mounted) return;
+
     setState(() {
       _isDiscovering = true;
       _peers.clear();
@@ -65,6 +69,7 @@ class _SendScreenState extends State<SendScreen> {
     });
 
     startDiscovery(timeoutSecs: BigInt.from(10)).listen((eventJson) {
+      if (!mounted) return;
       final event = jsonDecode(eventJson);
       if (event['Discovery'] != null) {
         final discEvent = event['Discovery'];
@@ -92,6 +97,7 @@ class _SendScreenState extends State<SendScreen> {
   }
 
   void _handleTransferEvent(String eventJson) {
+    if (!mounted) return;
     final event = jsonDecode(eventJson);
     if (event['Log'] != null) {
       // TEMP DIAG
@@ -126,8 +132,17 @@ class _SendScreenState extends State<SendScreen> {
   void _sendToPeer(String address, String? pin) {
     if (_selectedFile == null) return;
 
-    startSend(filePath: _selectedFile!, peerAddress: address, optionalPin: pin)
-        .listen(_handleTransferEvent);
+    startSend(filePath: _selectedFile!, peerAddress: address, optionalPin: pin).listen(
+      _handleTransferEvent,
+      onError: (e) {
+        if (mounted) {
+          setState(() {
+            _transferStatus = 'Error: $e';
+            _progress = null;
+          });
+        }
+      },
+    );
   }
 
   Future<void> _handleRoomCodeConnect() async {
@@ -528,7 +543,7 @@ class _SendScreenState extends State<SendScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Send'),
+        title: const Text('Plenum', style: TextStyle(fontWeight: FontWeight.w900, color: AppTheme.accentPrimary, letterSpacing: -0.5)),
         actions: [
           if (_mode == _TransferMode.local)
             IconButton(

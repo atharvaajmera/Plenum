@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:mobile/src/rust/api/plenum_api.dart';
+import 'package:permission_handler/permission_handler.dart';
 import '../config.dart';
 import '../services/internet_settings.dart';
 import '../services/media_scanner.dart';
@@ -49,14 +50,20 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
   bool _roomCodeCopied = false;
   bool _remoteStarted = false;
 
-  void _startReceiving() async {
-    final granted = await ReceiveStorage.ensurePermission();
-    if (!granted) {
+  Future<void> _startLocalReceiver() async {
+    if (_isListening) return;
+
+    final grantedStorage = await ReceiveStorage.ensurePermission();
+    if (!grantedStorage) {
       if (mounted) {
         setState(() => _statusMessage = 'Storage permission needed to save files');
       }
       return;
     }
+
+    await Permission.nearbyWifiDevices.request();
+    if (!mounted) return;
+
     final outputDir = await ReceiveStorage.outputDir();
     setState(() {
       _isListening = true;
@@ -64,6 +71,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     });
 
     startReceive(outputDir: outputDir, port: 0, announce: true).listen((eventJson) {
+      if (!mounted) return;
       final event = jsonDecode(eventJson);
 
       if (event['Log'] != null) {
@@ -157,6 +165,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
       // peer connection right as the sender's data channel opened.
       connectTimeoutSecs: BigInt.from(600),
     ).listen((eventJson) {
+      if (!mounted) return;
       final event = jsonDecode(eventJson);
       if (event['Log'] != null) {
         // TEMP DIAG
@@ -233,7 +242,9 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Receive')),
+      appBar: AppBar(
+        title: const Text('Plenum', style: TextStyle(fontWeight: FontWeight.w900, color: AppTheme.accentPrimary, letterSpacing: -0.5)),
+      ),
       body: Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -260,7 +271,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
 
             if (_mode == _TransferMode.local)
               GestureDetector(
-                onTap: _isListening ? null : _startReceiving,
+                onTap: _isListening ? null : _startLocalReceiver,
                 child: AnimatedRadar(isListening: _isListening),
               )
             else

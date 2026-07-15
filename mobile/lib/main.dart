@@ -11,11 +11,7 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await RustLib.init();
 
-  // LAN discovery needs nearby-wifi access; storage permission is requested
-  // contextually when receiving a file (see ReceiveStorage.ensurePermission).
-  await [
-    Permission.nearbyWifiDevices,
-  ].request();
+  // Storage permission is requested contextually when receiving a file (see ReceiveStorage.ensurePermission).
 
   runApp(const PlenumApp());
 }
@@ -58,7 +54,10 @@ class _MainScreenState extends State<MainScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: _screens[_selectedIndex],
+      body: IndexedStack(
+        index: _selectedIndex,
+        children: _screens,
+      ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _selectedIndex,
         onDestinationSelected: _onItemTapped,
