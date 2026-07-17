@@ -1,34 +1,22 @@
+import 'dart:async';
 import 'dart:convert';
+import 'package:network_info_plus/network_info_plus.dart';
+import 'package:open_filex/open_filex.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:mobile/src/rust/api/plenum_api.dart';
 import 'package:permission_handler/permission_handler.dart';
-import '../config.dart';
-import '../services/internet_settings.dart';
-import '../services/media_scanner.dart';
 import '../services/receive_storage.dart';
+import '../services/internet_settings.dart';
 import '../theme.dart';
 import '../widgets/animated_radar.dart';
+import 'package:provider/provider.dart';
+import '../services/settings_service.dart';
 
-enum _TransferMode { local, internet }
-
-String _friendlyState(String state) {
-  switch (state) {
-    case 'Discovering':
-      return 'Searching...';
-    case 'Listening':
-      return 'Ready to receive files';
-    case 'Connecting':
-    case 'SignalingConnected':
-      return 'Connecting to device...';
-    case 'NegotiatingIce':
-      return 'Establishing connection...';
-    case 'Connected':
-      return 'Connected to device...';
-    default:
-      return 'Connecting to device...';
-  }
-}
+import '../utils/transfer_status.dart';
+import '../utils/formatters.dart';
+import 'settings_screen.dart';
 
 class ReceiveScreen extends StatefulWidget {
   const ReceiveScreen({super.key});
@@ -38,7 +26,20 @@ class ReceiveScreen extends StatefulWidget {
 }
 
 class _ReceiveScreenState extends State<ReceiveScreen> {
-  _TransferMode _mode = _TransferMode.local;
+  TransferMode _mode = TransferMode.local;
+  bool _initializedMode = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (!_initializedMode) {
+      final settings = context.read<SettingsService>();
+      setState(() {
+        _mode = settings.defaultTransferMode == 0 ? TransferMode.local : TransferMode.internet;
+      });
+      _initializedMode = true;
+    }
+  }
 
   bool _isListening = false;
   String _statusMessage = 'Tap radar to start receiving';
@@ -50,6 +51,85 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
   bool _roomCodeCopied = false;
   bool _remoteStarted = false;
 
+  StreamSubscription<String>? _localSub;
+  StreamSubscription<String>? _remoteSub;
+  String? _localAddress;
+  String? _sessionToken;
+  bool _requirePinActive = false;
+  bool _autoAcceptActive = true;
+
+  int? _totalBytes;
+  int? _transferredBytes;
+  DateTime? _transferStartTime;
+  String? _speedText;
+  String? _etaText;
+  String? _savedFilePath;
+  String? _savedLocation;
+
+  void _fetchAndSetLocalAddress(int port) async {
+    try {
+      final ip = await NetworkInfo().getWifiIP();
+      if (ip != null && mounted) {
+        setState(() {
+          _localAddress = '$ip:$port';
+        });
+      }
+    } catch (_) {}
+  }
+
+  void _handleLogEvent(dynamic log) {
+    final level = log['level'];
+    if (level == 'Warn' || level == 'Error') {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(log['message'] ?? 'Error occurred'),
+        backgroundColor: level == 'Error' ? Colors.redAccent : Colors.orange,
+      ));
+    }
+  }
+
+  @override
+  void dispose() {
+    final token = _sessionToken;
+    if (token != null) {
+      try {
+        cancelSession(sessionToken: token);
+      } catch (_) {}
+    }
+    _localSub?.cancel();
+    _remoteSub?.cancel();
+    super.dispose();
+  }
+
+  void _stopReceiving() {
+    // Cancel Rust-side transfer loop first, then drop the Dart subscriptions.
+    final token = _sessionToken;
+    if (token != null) {
+      try {
+        cancelSession(sessionToken: token);
+      } catch (_) {}
+    }
+    _sessionToken = null;
+    _localSub?.cancel();
+    _remoteSub?.cancel();
+    setState(() {
+      _isListening = false;
+      _remoteStarted = false;
+      _statusMessage = 'Tap radar to start receiving';
+      _pin = null;
+      _requirePinActive = false;
+      _roomCode = null;
+      _progress = null;
+      _localAddress = null;
+      _totalBytes = null;
+      _transferredBytes = null;
+      _transferStartTime = null;
+      _speedText = null;
+      _etaText = null;
+      _savedFilePath = null;
+      _savedLocation = null;
+    });
+  }
+
   Future<void> _startLocalReceiver() async {
     if (_isListening) return;
 
@@ -57,6 +137,10 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     if (!grantedStorage) {
       if (mounted) {
         setState(() => _statusMessage = 'Storage permission needed to save files');
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: const Text('Storage permission is required to save files to Download'),
+          action: SnackBarAction(label: 'Settings', onPressed: () => openAppSettings()),
+        ));
       }
       return;
     }
@@ -65,48 +149,49 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     if (!mounted) return;
 
     final outputDir = await ReceiveStorage.outputDir();
+    final settings = context.read<SettingsService>();
+    final deviceName = settings.deviceName;
+    final requirePin = settings.requirePin;
+    final autoAccept = settings.autoAccept;
+
     setState(() {
       _isListening = true;
+      _requirePinActive = requirePin;
+      _autoAcceptActive = autoAccept;
       _statusMessage = 'Listening for incoming files...';
     });
 
-    startReceive(outputDir: outputDir, port: 0, announce: true).listen((eventJson) {
+    final sessionToken = DateTime.now().millisecondsSinceEpoch.toString();
+    _sessionToken = sessionToken;
+    _localSub = startReceive(
+      outputDir: outputDir,
+      port: 0,
+      announce: true,
+      deviceName: deviceName,
+      sessionToken: sessionToken,
+      requirePin: requirePin,
+      autoAccept: autoAccept,
+    ).listen((eventJson) {
       if (!mounted) return;
       final event = jsonDecode(eventJson);
 
       if (event['Log'] != null) {
-        // TEMP DIAG
-        // ignore: avoid_print
-        print('[PLENUM] ${event['Log']['message']}');
+        _handleLogEvent(event['Log']);
         return;
       }
 
       if (event['Discovery'] != null) {
         final discEvent = event['Discovery'];
         if (discEvent['BroadcastStarted'] != null) {
+          final port = discEvent['BroadcastStarted']['port'];
           setState(() {
             _pin = discEvent['BroadcastStarted']['token'];
             _statusMessage = 'Ready to receive files';
           });
+          _fetchAndSetLocalAddress(port);
         }
       } else if (event['Transfer'] != null) {
-        final transEvent = event['Transfer'];
-        if (transEvent['Started'] != null) {
-          setState(() => _statusMessage = 'Receiving ${transEvent['Started']['file_name']}...');
-        } else if (transEvent['Progress'] != null) {
-          final p = transEvent['Progress'];
-          setState(() {
-            _progress = p['transferred_bytes'] / p['total_bytes'];
-          });
-        } else if (transEvent['Completed'] != null) {
-          final fileName = transEvent['Completed']['file_name'];
-          if (fileName != null) MediaScanner.scan('$outputDir/$fileName');
-          setState(() {
-            _statusMessage = 'Transfer complete!';
-            _progress = 1.0;
-            _isListening = false;
-          });
-        }
+        _handleTransferEvent(event['Transfer'], outputDir);
       }
     }, onError: (e) {
       setState(() {
@@ -116,7 +201,158 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     });
   }
 
+  void _handleTransferEvent(dynamic transEvent, String outputDir) {
+    if (transEvent['StateChanged'] != null) {
+      final state = transEvent['StateChanged']['state'];
+      if (state == 'Closed') {
+        _stopReceiving();
+        setState(() => _statusMessage = 'Connection closed');
+      } else {
+        setState(() {
+          _statusMessage = state == 'Connected' ? 'Connected to device...' : friendlyState(state, isReceive: true);
+        });
+      }
+    } else if (transEvent['IncomingRequest'] != null) {
+      final req = transEvent['IncomingRequest'];
+      _showIncomingRequestDialog(
+        fileName: req['file_name'] ?? 'Unknown file',
+        totalBytes: req['total_bytes'] ?? 0,
+        peer: req['peer'],
+      );
+    } else if (transEvent['Cancelled'] != null) {
+      setState(() {
+        _statusMessage = 'Transfer cancelled';
+        _progress = null;
+      });
+    } else if (transEvent['Declined'] != null) {
+      final reason = transEvent['Declined']['reason'];
+      setState(() {
+        _statusMessage = reason == 'cancelled'
+            ? 'Sender cancelled the transfer'
+            : 'Transfer declined';
+        _progress = null;
+      });
+    } else if (transEvent['Started'] != null) {
+      setState(() {
+        _statusMessage = 'Receiving ${transEvent['Started']['file_name']}...';
+        _progress = 0.0;
+        _totalBytes = transEvent['Started']['total_bytes'];
+        _transferStartTime = DateTime.now();
+        _speedText = null;
+        _etaText = null;
+      });
+    } else if (transEvent['Resumed'] != null) {
+      setState(() {
+        final resumedBytes = transEvent['Resumed']['resumed_bytes'] ?? 0;
+        final percent = _totalBytes != null && _totalBytes! > 0 ? (resumedBytes / _totalBytes! * 100).toStringAsFixed(1) : '0';
+        _statusMessage = 'Resuming from $percent%...';
+      });
+    } else if (transEvent['Progress'] != null) {
+      final p = transEvent['Progress'];
+      setState(() {
+        _transferredBytes = p['transferred_bytes'];
+        _totalBytes = p['total_bytes'];
+        if (_totalBytes != null && _totalBytes! > 0) {
+          _progress = _transferredBytes! / _totalBytes!;
+        }
+
+        if (_transferStartTime != null && _transferredBytes != null && _totalBytes != null) {
+          final elapsed = DateTime.now().difference(_transferStartTime!);
+          if (elapsed.inSeconds > 0) {
+            final speedBps = _transferredBytes! / elapsed.inSeconds;
+            _speedText = '${formatBytes(speedBps.round())}/s';
+            final remainingBytes = _totalBytes! - _transferredBytes!;
+            final etaSeconds = speedBps > 0 ? remainingBytes / speedBps : 0;
+            _etaText = '${etaSeconds.round()}s left';
+          }
+        }
+      });
+    } else if (transEvent['Completed'] != null) {
+      final summary = transEvent['Completed'];
+      final fileName = summary['file_name'];
+      final localPath = fileName != null ? '$outputDir/$fileName' : null;
+      final settings = context.read<SettingsService>();
+      settings.addTransferHistory({
+        'direction': 'receive',
+        'fileName': fileName ?? 'Unknown file',
+        'size': summary['total_bytes'] ?? _totalBytes,
+        'peerName': summary['peer'] ?? 'Unknown sender',
+        'path': localPath,
+        'timestamp': DateTime.now().toIso8601String(),
+      });
+      setState(() {
+        _statusMessage = 'Transfer complete!';
+        _progress = 1.0;
+        // Keep the app-dir path for Open/Share: they need a real file path,
+        // which the MediaStore copy in Downloads doesn't expose.
+        _savedFilePath = localPath;
+        _savedLocation = null;
+      });
+      // Copy into public Downloads via MediaStore (no permission needed on
+      // Android 10+). Best-effort: the file is safe in app storage either way.
+      if (localPath != null) {
+        ReceiveStorage.exportToDownloads(localPath).then((saved) {
+          if (mounted && saved != null) {
+            setState(() => _savedLocation = saved);
+          }
+        });
+      }
+    }
+  }
+
+  /// Accept gate: shown when the engine emits `IncomingRequest` and
+  /// auto-accept is off. The Rust loop blocks until we answer (or its
+  /// 120s approval timeout declines for us).
+  Future<void> _showIncomingRequestDialog({
+    required String fileName,
+    required int totalBytes,
+    String? peer,
+  }) async {
+    if (_autoAcceptActive) return; // engine already proceeding
+    final token = _sessionToken;
+    if (token == null) return;
+    setState(() => _statusMessage = 'Incoming file — waiting for your decision');
+    final accepted = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        title: const Text('Incoming file'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(fileName, style: const TextStyle(fontWeight: FontWeight.bold)),
+            const SizedBox(height: 4),
+            Text(formatBytes(totalBytes), style: const TextStyle(color: AppTheme.textSecondary)),
+            if (peer != null) ...[
+              const SizedBox(height: 4),
+              Text('From: $peer', style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+            ],
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Decline'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Accept'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted) return;
+    try {
+      respondToIncoming(sessionToken: token, accept: accepted == true);
+    } catch (_) {}
+    if (accepted != true) {
+      setState(() => _statusMessage = 'Transfer declined');
+    }
+  }
+
   Future<void> _setupRemoteReceiver() async {
+    _stopReceiving();
     if (_remoteStarted) return;
     _remoteStarted = true;
 
@@ -124,6 +360,10 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     if (!granted) {
       if (mounted) {
         setState(() => _statusMessage = 'Storage permission needed to save files');
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: const Text('Storage permission is required to save files to Download'),
+          action: SnackBarAction(label: 'Settings', onPressed: () => openAppSettings()),
+        ));
       }
       _remoteStarted = false;
       return;
@@ -141,8 +381,16 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     if (!mounted) return;
     setState(() => _roomCode = code);
 
-    const relayServerUrl = PlenumConfig.relayServerUrl;
-    final iceServers = PlenumConfig.defaultIceServers();
+    final settings = context.read<SettingsService>();
+    final relayServerUrl = settings.relayServerUrl;
+    final autoAccept = settings.autoAccept;
+    _autoAcceptActive = autoAccept;
+    final iceServers = settings.iceServers
+        .split('\n')
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .map((e) => IceServerSetting(urls: e))
+        .toList();
 
     if (mounted) setState(() => _statusMessage = 'Waiting for sender...');
 
@@ -153,53 +401,26 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
       iceServers,
     );
 
-    startReceiveRemote(
+    final sessionToken = DateTime.now().millisecondsSinceEpoch.toString();
+    _sessionToken = sessionToken;
+    _remoteSub = startReceiveRemote(
       outputDir: outputDir,
       relayServerUrl: relayServerUrl,
       sessionId: code,
       myPeerId: myPeerId,
       iceServersJson: iceServersJson,
-      // Generous: this clock starts the moment the room code is shown, and it
-      // has to cover the human on the other end reading the code, typing it,
-      // and picking a file. 30s reliably expired mid-negotiation, closing the
-      // peer connection right as the sender's data channel opened.
       connectTimeoutSecs: BigInt.from(600),
+      sessionToken: sessionToken,
+      autoAccept: autoAccept,
     ).listen((eventJson) {
       if (!mounted) return;
       final event = jsonDecode(eventJson);
       if (event['Log'] != null) {
-        // TEMP DIAG
-        // ignore: avoid_print
-        print('[PLENUM] ${event['Log']['message']}');
+        _handleLogEvent(event['Log']);
         return;
       }
       if (event['Transfer'] != null) {
-        final trans = event['Transfer'];
-        if (trans['StateChanged'] != null) {
-          if (trans['StateChanged']['state'] != 'Closed') {
-            setState(() {
-              _statusMessage = trans['StateChanged']['state'] == 'Connected'
-                  ? 'Connected to device...'
-                  : _friendlyState(trans['StateChanged']['state']);
-            });
-          }
-        } else if (trans['Started'] != null) {
-          setState(() {
-            _statusMessage = 'Receiving ${trans['Started']['file_name']}...';
-            _progress = 0.0;
-          });
-        } else if (trans['Progress'] != null) {
-          setState(() {
-            _progress = trans['Progress']['transferred_bytes'] / trans['Progress']['total_bytes'];
-          });
-        } else if (trans['Completed'] != null) {
-          final fileName = trans['Completed']['file_name'];
-          if (fileName != null) MediaScanner.scan('$outputDir/$fileName');
-          setState(() {
-            _statusMessage = 'Received successfully!';
-            _progress = 1.0;
-          });
-        }
+        _handleTransferEvent(event['Transfer'], outputDir);
       }
     }, onError: (e) {
       if (mounted) setState(() => _statusMessage = 'Error: $e');
@@ -226,14 +447,14 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     }
   }
 
-  void _switchMode(_TransferMode mode) {
+  void _switchMode(TransferMode mode) {
     setState(() {
       _mode = mode;
-      _statusMessage = mode == _TransferMode.local
+      _statusMessage = mode == TransferMode.local
           ? 'Tap radar to start receiving'
           : 'Preparing...';
     });
-    if (mode == _TransferMode.internet) {
+    if (mode == TransferMode.internet) {
       _remoteStarted = false;
       _setupRemoteReceiver();
     }
@@ -244,38 +465,54 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Plenum', style: TextStyle(fontWeight: FontWeight.w900, color: AppTheme.accentPrimary, letterSpacing: -0.5)),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.settings),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context) => const SettingsScreen()),
+              );
+            },
+          )
+        ],
       ),
       body: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.symmetric(vertical: 24),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
             Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 _ModeChip(
                   icon: Icons.wifi,
                   label: 'Local Network',
-                  selected: _mode == _TransferMode.local,
-                  onTap: () => _switchMode(_TransferMode.local),
+                  selected: _mode == TransferMode.local,
+                  onTap: () => _switchMode(TransferMode.local),
                 ),
                 const SizedBox(width: 12),
                 _ModeChip(
                   icon: Icons.public,
                   label: 'Internet',
-                  selected: _mode == _TransferMode.internet,
-                  onTap: () => _switchMode(_TransferMode.internet),
+                  selected: _mode == TransferMode.internet,
+                  onTap: () => _switchMode(TransferMode.internet),
                 ),
               ],
             ),
             const SizedBox(height: 32),
 
-            if (_mode == _TransferMode.local)
+            if (_mode == TransferMode.local)
               GestureDetector(
                 onTap: _isListening ? null : _startLocalReceiver,
                 child: AnimatedRadar(isListening: _isListening),
               )
             else
-              const Icon(Icons.public, size: 96, color: AppTheme.accentPrimary),
+              GestureDetector(
+                onTap: _remoteStarted ? null : _setupRemoteReceiver,
+                child: AnimatedRadar(isListening: _remoteStarted),
+              ),
 
             const SizedBox(height: 40),
             Text(
@@ -283,8 +520,35 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
               style: const TextStyle(fontSize: 16, color: AppTheme.textSecondary),
               textAlign: TextAlign.center,
             ),
+            
+            if (_isListening || _remoteStarted)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: TextButton.icon(
+                  onPressed: _stopReceiving,
+                  icon: const Icon(Icons.stop_circle, color: AppTheme.accentPrimary),
+                  label: const Text('Stop Receiving', style: TextStyle(color: AppTheme.accentPrimary)),
+                ),
+              ),
 
-            if (_mode == _TransferMode.local && _pin != null)
+            if (_statusMessage.startsWith('Error:'))
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: ElevatedButton.icon(
+                  onPressed: () {
+                    _stopReceiving();
+                    if (_mode == TransferMode.local) {
+                      _startLocalReceiver();
+                    } else {
+                      _setupRemoteReceiver();
+                    }
+                  },
+                  icon: const Icon(Icons.refresh),
+                  label: const Text('Retry'),
+                ),
+              ),
+
+            if (_mode == TransferMode.local && _pin != null)
               Container(
                 margin: const EdgeInsets.only(top: 24),
                 padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
@@ -296,7 +560,13 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    const Text('PIN Required', style: TextStyle(fontSize: 12, color: AppTheme.textSecondary)),
+                    Text(
+                      _requirePinActive
+                          ? 'PIN required — senders must enter this code'
+                          : 'Pairing code — senders can use this to find you',
+                      style: const TextStyle(fontSize: 12, color: AppTheme.textSecondary),
+                      textAlign: TextAlign.center,
+                    ),
                     const SizedBox(height: 8),
                     Row(
                       mainAxisSize: MainAxisSize.min,
@@ -328,11 +598,15 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                         ),
                       ],
                     ),
+                    if (_localAddress != null) ...[
+                      const SizedBox(height: 12),
+                      Text('Your address: $_localAddress', style: const TextStyle(fontSize: 12, color: AppTheme.textSecondary)),
+                    ],
                   ],
                 ),
               ),
 
-            if (_mode == _TransferMode.internet && _roomCode != null)
+            if (_mode == TransferMode.internet && _roomCode != null)
               Container(
                 margin: const EdgeInsets.only(top: 24),
                 padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
@@ -374,26 +648,102 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                             ),
                           ),
                         ),
+                        const SizedBox(width: 8),
+                        GestureDetector(
+                          onTap: () {
+                            Share.share('Use this code to send files on Plenum: $_roomCode');
+                          },
+                          child: Container(
+                            padding: const EdgeInsets.all(8),
+                            decoration: BoxDecoration(
+                              color: AppTheme.bgSidebar,
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: const Icon(Icons.share, size: 20, color: AppTheme.textSecondary),
+                          ),
+                        ),
                       ],
                     ),
+                    const SizedBox(height: 12),
+                    const Text('Code valid while this screen is open', style: TextStyle(fontSize: 12, color: AppTheme.textSecondary)),
                   ],
                 ),
               ),
 
             if (_progress != null)
-              Padding(
-                padding: const EdgeInsets.all(32.0),
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(8),
-                  child: LinearProgressIndicator(
-                    value: _progress,
-                    minHeight: 8,
-                    backgroundColor: AppTheme.bgSidebar,
-                    valueColor: const AlwaysStoppedAnimation<Color>(AppTheme.accentPrimary),
-                  ),
+              Container(
+                margin: const EdgeInsets.only(top: 24),
+                padding: const EdgeInsets.all(16),
+                width: 300,
+                decoration: BoxDecoration(
+                  color: AppTheme.bgSidebar,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Column(
+                  children: [
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(4),
+                      child: LinearProgressIndicator(
+                        value: _progress,
+                        minHeight: 8,
+                        backgroundColor: AppTheme.bgApp,
+                        valueColor: const AlwaysStoppedAnimation<Color>(AppTheme.accentPrimary),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          '${(_progress! * 100).toStringAsFixed(1)}%',
+                          style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+                        ),
+                        if (_speedText != null && _etaText != null)
+                          Text(
+                            '$_speedText • $_etaText',
+                            style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+                          ),
+                      ],
+                    ),
+                    if (_progress == 1.0 && _savedFilePath != null) ...[
+                      const SizedBox(height: 16),
+                      Text(
+                        _savedLocation != null ? 'Saved to $_savedLocation' : 'Saving to Downloads...',
+                        style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+                      ),
+                      const SizedBox(height: 16),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          ElevatedButton(
+                            onPressed: () => OpenFilex.open(_savedFilePath!),
+                            child: const Text('Open'),
+                          ),
+                          const SizedBox(width: 8),
+                          ElevatedButton(
+                            onPressed: () => Share.shareXFiles([XFile(_savedFilePath!)]),
+                            child: const Text('Share'),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      TextButton(
+                        onPressed: () {
+                          _stopReceiving();
+                          if (_mode == TransferMode.local) {
+                            _startLocalReceiver();
+                          } else {
+                            _setupRemoteReceiver();
+                          }
+                        },
+                        child: const Text('Receive another'),
+                      ),
+                    ]
+                  ],
                 ),
               ),
           ],
+        ),
         ),
       ),
     );

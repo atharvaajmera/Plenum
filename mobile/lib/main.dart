@@ -1,19 +1,26 @@
 import 'package:flutter/material.dart';
 import 'package:mobile/src/rust/frb_generated.dart';
-import 'package:permission_handler/permission_handler.dart';
 
 import 'screens/send_screen.dart';
 import 'screens/receive_screen.dart';
 import 'screens/settings_screen.dart';
 import 'theme.dart';
 
+import 'package:provider/provider.dart';
+import 'services/settings_service.dart';
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await RustLib.init();
 
-  // Storage permission is requested contextually when receiving a file (see ReceiveStorage.ensurePermission).
+  final settingsService = await SettingsService.init();
 
-  runApp(const PlenumApp());
+  runApp(
+    ChangeNotifierProvider.value(
+      value: settingsService,
+      child: const PlenumApp(),
+    ),
+  );
 }
 
 class PlenumApp extends StatelessWidget {
@@ -21,10 +28,16 @@ class PlenumApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Plenum',
-      theme: AppTheme.darkTheme,
-      home: const MainScreen(),
+    return Consumer<SettingsService>(
+      builder: (context, settings, _) {
+        return MaterialApp(
+          title: 'Plenum',
+          theme: AppTheme.darkTheme, // TODO: add lightTheme if needed
+          darkTheme: AppTheme.darkTheme,
+          themeMode: settings.themeMode,
+          home: const MainScreen(),
+        );
+      },
     );
   }
 }
@@ -42,7 +55,6 @@ class _MainScreenState extends State<MainScreen> {
   static const List<Widget> _screens = <Widget>[
     SendScreen(),
     ReceiveScreen(),
-    SettingsScreen(),
   ];
 
   void _onItemTapped(int index) {
@@ -71,11 +83,6 @@ class _MainScreenState extends State<MainScreen> {
             icon: Icon(Icons.download_outlined),
             selectedIcon: Icon(Icons.download),
             label: 'Receive',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.settings_outlined),
-            selectedIcon: Icon(Icons.settings),
-            label: 'Settings',
           ),
         ],
       ),
