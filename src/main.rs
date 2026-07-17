@@ -215,6 +215,34 @@ impl plenum::app::EventSink for CliEventSink {
                         summary.direction, summary.file_name, summary.elapsed_ms
                     ));
                 }
+                TransferEvent::IncomingRequest {
+                    file_name,
+                    total_bytes,
+                    peer,
+                    ..
+                } => {
+                    self.println(format!(
+                        "Incoming transfer '{}' ({} bytes) from {}",
+                        file_name,
+                        total_bytes,
+                        peer.unwrap_or_else(|| "unknown peer".to_string())
+                    ));
+                }
+                TransferEvent::AwaitingApproval { .. } => {
+                    self.println("Waiting for the receiver to accept the transfer...");
+                }
+                TransferEvent::Cancelled { .. } => {
+                    if let Some(pb) = self.progress.take() {
+                        pb.finish_and_clear();
+                    }
+                    self.println("Transfer cancelled.");
+                }
+                TransferEvent::Declined { reason, .. } => {
+                    if let Some(pb) = self.progress.take() {
+                        pb.finish_and_clear();
+                    }
+                    self.println(format!("Transfer refused by peer ({reason})."));
+                }
             },
             PlenumEvent::Benchmark(event) => match event {
                 BenchmarkEvent::Started {
@@ -281,6 +309,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     port,
                     output_dir,
                     announce_on_lan: !no_discover,
+                    device_name: None,
+                    require_pin: false,
+                    auto_accept: true,
                     permissions,
                     options,
                 },

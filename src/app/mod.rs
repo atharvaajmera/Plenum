@@ -12,8 +12,8 @@ pub mod types;
 pub use engine::PlenumCore;
 pub use error::AppError;
 pub use types::{
-    BenchmarkEvent, BenchmarkIterationSummary, BenchmarkRequest, BenchmarkSummary,
+    AcceptDecision, BenchmarkEvent, BenchmarkIterationSummary, BenchmarkRequest, BenchmarkSummary,
     ConnectionState, CorePermissions, DiscoverRequest, DiscoveryEvent, DiscoverySummary, EventSink,
-    LogLevel, PermissionKind, PlenumEvent, ReceiveRequest, SendRequest, TransferDirection, TransferEvent,
-    TransferOptions, TransferSummary,
+    LogLevel, PermissionKind, PlenumEvent, ReceiveRequest, SendRequest, SessionControl,
+    TransferDirection, TransferEvent, TransferOptions, TransferSummary,
 };

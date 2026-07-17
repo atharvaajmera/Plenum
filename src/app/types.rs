@@ -1,8 +1,81 @@
 //! Stable app-facing request, result, and event types.
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use serde::{Deserialize, Serialize};
+
+/// Pending/accept/decline state of an incoming-transfer approval (see
+/// [`SessionControl`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcceptDecision {
+    Pending,
+    Accepted,
+    Declined,
+}
+
+/// Shared, thread-safe control handle for one engine session.
+///
+/// Engine calls (`send_file`, `receive_file`, ...) are blocking and
+/// run-to-completion; this handle is the side channel a UI thread uses to
+/// influence them while they run:
+///
+/// - `cancel()` — cooperative cancellation. The transfer/listen loops poll
+///   [`Self::is_cancelled`] and abort with [`crate::app::AppError::Cancelled`].
+/// - `accept()` / `decline()` — resolves the incoming-file approval gate the
+///   receiver blocks on after emitting `TransferEvent::IncomingRequest`.
+///
+/// Obtain it via [`crate::app::engine::PlenumCore::control`] before starting
+/// the blocking call (it is `Clone`; all clones share state).
+#[derive(Debug, Clone, Default)]
+pub struct SessionControl {
+    cancelled: Arc<AtomicBool>,
+    /// 0 = pending, 1 = accepted, 2 = declined.
+    decision: Arc<AtomicU8>,
+}
+
+impl SessionControl {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Relaxed)
+    }
+
+    pub fn accept(&self) {
+        self.decision.store(1, Ordering::Relaxed);
+    }
+
+    pub fn decline(&self) {
+        self.decision.store(2, Ordering::Relaxed);
+    }
+
+    pub fn decision(&self) -> AcceptDecision {
+        match self.decision.load(Ordering::Relaxed) {
+            1 => AcceptDecision::Accepted,
+            2 => AcceptDecision::Declined,
+            _ => AcceptDecision::Pending,
+        }
+    }
+
+    /// Clears a previous accept/decline so the next incoming file on the same
+    /// session prompts again.
+    pub fn reset_decision(&self) {
+        self.decision.store(0, Ordering::Relaxed);
+    }
+
+    /// Raw cancellation flag, for layers (e.g. `crate::rtc`) that must not
+    /// depend on app types.
+    pub fn cancel_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cancelled)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PermissionKind {
@@ -81,8 +154,24 @@ pub struct ReceiveRequest {
     pub port: u16,
     pub output_dir: PathBuf,
     pub announce_on_lan: bool,
+    pub device_name: Option<String>,
+    /// When true, senders must prove knowledge of the pairing code (via an
+    /// `Auth` packet) before a transfer is accepted, and the beacon announces
+    /// `pin_required` instead of broadcasting the code itself.
+    #[serde(default)]
+    pub require_pin: bool,
+    /// When false, the engine emits `TransferEvent::IncomingRequest` on the
+    /// first `Start` packet and blocks until the app resolves it via
+    /// [`SessionControl::accept`]/[`SessionControl::decline`]. Defaults to
+    /// true (auto-accept) so existing CLI/desktop callers keep their behavior.
+    #[serde(default = "default_true")]
+    pub auto_accept: bool,
     pub permissions: CorePermissions,
     pub options: TransferOptions,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,6 +207,9 @@ pub struct ReceiveRemoteRequest {
     pub my_peer_id: String,
     pub ice_servers: Vec<crate::signaling::IceServer>,
     pub connect_timeout_secs: u64,
+    /// See [`ReceiveRequest::auto_accept`].
+    #[serde(default = "default_true")]
+    pub auto_accept: bool,
     pub permissions: CorePermissions,
     pub options: TransferOptions,
 }
@@ -186,6 +278,10 @@ pub struct DiscoverySummary {
     pub hostname: String,
     pub address: String,
     pub token: String,
+    /// True when the peer's beacon indicates it will only accept transfers
+    /// carrying a valid pairing code — the send UI should prompt for one.
+    #[serde(default)]
+    pub pin_required: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -209,6 +305,38 @@ pub enum TransferEvent {
         direction: TransferDirection,
         state: ConnectionState,
         peer: Option<String>,
+    },
+    /// Receiver only: a sender wants to deliver this file and the request is
+    /// gated on user approval (`ReceiveRequest::auto_accept == false`). The
+    /// engine blocks until [`SessionControl::accept`]/[`decline`] resolves it
+    /// (or the approval window times out, which declines).
+    ///
+    /// [`decline`]: SessionControl::decline
+    IncomingRequest {
+        direction: TransferDirection,
+        file_name: String,
+        total_bytes: u64,
+        peer: Option<String>,
+    },
+    /// Sender only: `Start` metadata was delivered and the sender is waiting
+    /// for the receiver's `Accept` go-ahead (auto-accept answers immediately;
+    /// a manual receiver may take a while).
+    AwaitingApproval {
+        direction: TransferDirection,
+        file_name: String,
+    },
+    /// The session was cancelled locally via [`SessionControl::cancel`]. The
+    /// corresponding engine call returns `AppError::Cancelled` right after.
+    Cancelled {
+        direction: TransferDirection,
+    },
+    /// The transfer was refused: by the local user (receiver declining an
+    /// incoming request) or by the peer (sender seeing the receiver's decline
+    /// / PIN rejection / cancellation). `reason` is a stable machine-readable
+    /// code: "declined", "pin_rejected", or "cancelled".
+    Declined {
+        direction: TransferDirection,
+        reason: String,
     },
     Started {
         direction: TransferDirection,

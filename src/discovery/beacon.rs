@@ -13,6 +13,8 @@
 //! TCP Port       2 bytes   big-endian
 //! Hostname Len   1 byte
 //! Hostname       M bytes   UTF-8 machine name
+//! Flags          1 byte    optional; bit 0 = PIN required (absent = 0x00,
+//!                          so pre-flags announcements still decode)
 //! ```
 
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
@@ -30,15 +32,22 @@ const DEFAULT_DISCOVER_TIMEOUT: Duration = Duration::from_secs(10);
 /// An announcement received from a peer on the local network.
 #[derive(Debug, Clone)]
 pub struct Announcement {
-    /// The pairing token broadcast by the peer.
+    /// The pairing token broadcast by the peer. Empty when the peer requires
+    /// a PIN — the code is then a secret shown only on the peer's screen and
+    /// proven in-band via an `Auth` packet, never broadcast.
     pub token: String,
     /// The TCP port the peer is listening on for file transfers.
     pub tcp_port: u16,
     /// The hostname of the peer.
     pub hostname: String,
+    /// Whether the peer requires senders to present the pairing code before
+    /// it accepts a transfer.
+    pub pin_required: bool,
     /// The source IP address the announcement came from.
     pub source_addr: Ipv4Addr,
 }
+
+const FLAG_PIN_REQUIRED: u8 = 0b0000_0001;
 
 impl Announcement {
     /// Returns the full TCP socket address to connect to for file transfer.
@@ -51,7 +60,7 @@ impl Announcement {
         let token_bytes = self.token.as_bytes();
         let hostname_bytes = self.hostname.as_bytes();
 
-        let capacity = 4 + 1 + 1 + token_bytes.len() + 2 + 1 + hostname_bytes.len();
+        let capacity = 4 + 1 + 1 + token_bytes.len() + 2 + 1 + hostname_bytes.len() + 1;
         let mut buf = Vec::with_capacity(capacity);
 
         buf.extend_from_slice(MAGIC);
@@ -61,6 +70,7 @@ impl Announcement {
         buf.extend_from_slice(&self.tcp_port.to_be_bytes());
         buf.push(hostname_bytes.len() as u8);
         buf.extend_from_slice(hostname_bytes);
+        buf.push(if self.pin_required { FLAG_PIN_REQUIRED } else { 0 });
 
         buf
     }
@@ -101,10 +111,15 @@ impl Announcement {
             .map_err(|_| DiscoveryError::MalformedAnnouncement)?
             .to_string();
 
+        // Optional trailing flags byte: announcements from older builds end at
+        // the hostname, which decodes as "no flags set".
+        let flags = data.get(hostname_end).copied().unwrap_or(0);
+
         Ok(Self {
             token,
             tcp_port,
             hostname,
+            pin_required: flags & FLAG_PIN_REQUIRED != 0,
             source_addr: source,
         })
     }
@@ -159,20 +174,33 @@ impl Beacon {
     /// always gets the announcement regardless of OS routing decisions.
     ///
     /// `tcp_port` is the port the receiver is listening on for file transfers.
+    ///
+    /// When `pin_required` is true the pairing code is NOT broadcast (the
+    /// announcement carries an empty token plus the pin-required flag): the
+    /// code doubles as the transfer secret, so putting it in a cleartext UDP
+    /// broadcast would defeat the check. Senders learn it out-of-band from
+    /// the receiver's screen.
     pub fn broadcast(
         &self,
         token: &PairingToken,
         tcp_port: u16,
+        device_name: Option<String>,
+        pin_required: bool,
     ) -> Result<BroadcastHandle, DiscoveryError> {
         let socket = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))?;
         socket.set_broadcast(true)?;
 
-        let hostname = hostname();
+        let hostname = device_name.unwrap_or_else(hostname);
 
         let announcement = Announcement {
-            token: token.code().to_string(),
+            token: if pin_required {
+                String::new()
+            } else {
+                token.code().to_string()
+            },
             tcp_port,
             hostname,
+            pin_required,
             source_addr: Ipv4Addr::UNSPECIFIED, // Not used for encoding
         };
 

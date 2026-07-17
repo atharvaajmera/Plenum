@@ -64,7 +64,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.12.0';
 
   @override
-  int get rustContentHash => -710997294;
+  int get rustContentHash => -1939234134;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -76,36 +76,51 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
 }
 
 abstract class RustLibApi extends BaseApi {
+  void crateApiPlenumApiCancelSession({required String sessionToken});
+
   String crateApiPlenumApiGeneratePeerIdSync();
 
   String crateApiPlenumApiGenerateRoomCodeSync();
 
   void crateApiPlenumApiInitApp();
 
+  void crateApiPlenumApiRespondToIncoming({
+    required String sessionToken,
+    required bool accept,
+  });
+
   Stream<String> crateApiPlenumApiStartDiscovery({required BigInt timeoutSecs});
 
   Stream<String> crateApiPlenumApiStartReceive({
+    required String sessionToken,
     required String outputDir,
     required int port,
     required bool announce,
+    String? deviceName,
+    required bool requirePin,
+    required bool autoAccept,
   });
 
   Stream<String> crateApiPlenumApiStartReceiveRemote({
+    required String sessionToken,
     required String outputDir,
     required String relayServerUrl,
     required String sessionId,
     required String myPeerId,
     required String iceServersJson,
     required BigInt connectTimeoutSecs,
+    required bool autoAccept,
   });
 
   Stream<String> crateApiPlenumApiStartSend({
+    required String sessionToken,
     required String filePath,
     required String peerAddress,
     String? optionalPin,
   });
 
   Stream<String> crateApiPlenumApiStartSendRemote({
+    required String sessionToken,
     required String filePath,
     required String relayServerUrl,
     required String sessionId,
@@ -124,12 +139,38 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   });
 
   @override
+  void crateApiPlenumApiCancelSession({required String sessionToken}) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(sessionToken, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 1)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiPlenumApiCancelSessionConstMeta,
+        argValues: [sessionToken],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiPlenumApiCancelSessionConstMeta =>
+      const TaskConstMeta(
+        debugName: "cancel_session",
+        argNames: ["sessionToken"],
+      );
+
+  @override
   String crateApiPlenumApiGeneratePeerIdSync() {
     return handler.executeSync(
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 1)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 2)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_String,
@@ -151,7 +192,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 2)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 3)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_String,
@@ -173,7 +214,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 3)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 4)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
@@ -190,6 +231,36 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "init_app", argNames: []);
 
   @override
+  void crateApiPlenumApiRespondToIncoming({
+    required String sessionToken,
+    required bool accept,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(sessionToken, serializer);
+          sse_encode_bool(accept, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 5)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiPlenumApiRespondToIncomingConstMeta,
+        argValues: [sessionToken, accept],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiPlenumApiRespondToIncomingConstMeta =>
+      const TaskConstMeta(
+        debugName: "respond_to_incoming",
+        argNames: ["sessionToken", "accept"],
+      );
+
+  @override
   Stream<String> crateApiPlenumApiStartDiscovery({
     required BigInt timeoutSecs,
   }) {
@@ -204,7 +275,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 4,
+              funcId: 6,
               port: port_,
             );
           },
@@ -229,9 +300,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   @override
   Stream<String> crateApiPlenumApiStartReceive({
+    required String sessionToken,
     required String outputDir,
     required int port,
     required bool announce,
+    String? deviceName,
+    required bool requirePin,
+    required bool autoAccept,
   }) {
     final sink = RustStreamSink<String>();
     unawaited(
@@ -240,13 +315,17 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           callFfi: (port_) {
             final serializer = SseSerializer(generalizedFrbRustBinding);
             sse_encode_StreamSink_String_Sse(sink, serializer);
+            sse_encode_String(sessionToken, serializer);
             sse_encode_String(outputDir, serializer);
             sse_encode_u_16(port, serializer);
             sse_encode_bool(announce, serializer);
+            sse_encode_opt_String(deviceName, serializer);
+            sse_encode_bool(requirePin, serializer);
+            sse_encode_bool(autoAccept, serializer);
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 5,
+              funcId: 7,
               port: port_,
             );
           },
@@ -255,7 +334,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             decodeErrorData: sse_decode_AnyhowException,
           ),
           constMeta: kCrateApiPlenumApiStartReceiveConstMeta,
-          argValues: [sink, outputDir, port, announce],
+          argValues: [
+            sink,
+            sessionToken,
+            outputDir,
+            port,
+            announce,
+            deviceName,
+            requirePin,
+            autoAccept,
+          ],
           apiImpl: this,
         ),
       ),
@@ -266,17 +354,28 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiPlenumApiStartReceiveConstMeta =>
       const TaskConstMeta(
         debugName: "start_receive",
-        argNames: ["sink", "outputDir", "port", "announce"],
+        argNames: [
+          "sink",
+          "sessionToken",
+          "outputDir",
+          "port",
+          "announce",
+          "deviceName",
+          "requirePin",
+          "autoAccept",
+        ],
       );
 
   @override
   Stream<String> crateApiPlenumApiStartReceiveRemote({
+    required String sessionToken,
     required String outputDir,
     required String relayServerUrl,
     required String sessionId,
     required String myPeerId,
     required String iceServersJson,
     required BigInt connectTimeoutSecs,
+    required bool autoAccept,
   }) {
     final sink = RustStreamSink<String>();
     unawaited(
@@ -285,16 +384,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           callFfi: (port_) {
             final serializer = SseSerializer(generalizedFrbRustBinding);
             sse_encode_StreamSink_String_Sse(sink, serializer);
+            sse_encode_String(sessionToken, serializer);
             sse_encode_String(outputDir, serializer);
             sse_encode_String(relayServerUrl, serializer);
             sse_encode_String(sessionId, serializer);
             sse_encode_String(myPeerId, serializer);
             sse_encode_String(iceServersJson, serializer);
             sse_encode_u_64(connectTimeoutSecs, serializer);
+            sse_encode_bool(autoAccept, serializer);
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 6,
+              funcId: 8,
               port: port_,
             );
           },
@@ -305,12 +406,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           constMeta: kCrateApiPlenumApiStartReceiveRemoteConstMeta,
           argValues: [
             sink,
+            sessionToken,
             outputDir,
             relayServerUrl,
             sessionId,
             myPeerId,
             iceServersJson,
             connectTimeoutSecs,
+            autoAccept,
           ],
           apiImpl: this,
         ),
@@ -324,17 +427,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         debugName: "start_receive_remote",
         argNames: [
           "sink",
+          "sessionToken",
           "outputDir",
           "relayServerUrl",
           "sessionId",
           "myPeerId",
           "iceServersJson",
           "connectTimeoutSecs",
+          "autoAccept",
         ],
       );
 
   @override
   Stream<String> crateApiPlenumApiStartSend({
+    required String sessionToken,
     required String filePath,
     required String peerAddress,
     String? optionalPin,
@@ -346,13 +452,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           callFfi: (port_) {
             final serializer = SseSerializer(generalizedFrbRustBinding);
             sse_encode_StreamSink_String_Sse(sink, serializer);
+            sse_encode_String(sessionToken, serializer);
             sse_encode_String(filePath, serializer);
             sse_encode_String(peerAddress, serializer);
             sse_encode_opt_String(optionalPin, serializer);
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 7,
+              funcId: 9,
               port: port_,
             );
           },
@@ -361,7 +468,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             decodeErrorData: sse_decode_AnyhowException,
           ),
           constMeta: kCrateApiPlenumApiStartSendConstMeta,
-          argValues: [sink, filePath, peerAddress, optionalPin],
+          argValues: [sink, sessionToken, filePath, peerAddress, optionalPin],
           apiImpl: this,
         ),
       ),
@@ -371,11 +478,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   TaskConstMeta get kCrateApiPlenumApiStartSendConstMeta => const TaskConstMeta(
     debugName: "start_send",
-    argNames: ["sink", "filePath", "peerAddress", "optionalPin"],
+    argNames: [
+      "sink",
+      "sessionToken",
+      "filePath",
+      "peerAddress",
+      "optionalPin",
+    ],
   );
 
   @override
   Stream<String> crateApiPlenumApiStartSendRemote({
+    required String sessionToken,
     required String filePath,
     required String relayServerUrl,
     required String sessionId,
@@ -390,6 +504,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           callFfi: (port_) {
             final serializer = SseSerializer(generalizedFrbRustBinding);
             sse_encode_StreamSink_String_Sse(sink, serializer);
+            sse_encode_String(sessionToken, serializer);
             sse_encode_String(filePath, serializer);
             sse_encode_String(relayServerUrl, serializer);
             sse_encode_String(sessionId, serializer);
@@ -399,7 +514,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 8,
+              funcId: 10,
               port: port_,
             );
           },
@@ -410,6 +525,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           constMeta: kCrateApiPlenumApiStartSendRemoteConstMeta,
           argValues: [
             sink,
+            sessionToken,
             filePath,
             relayServerUrl,
             sessionId,
@@ -429,6 +545,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         debugName: "start_send_remote",
         argNames: [
           "sink",
+          "sessionToken",
           "filePath",
           "relayServerUrl",
           "sessionId",

@@ -1,8 +1,10 @@
 //! `RtcTransport`: a `crate::transport::Transport` implementation backed by a
 //! WebRTC data channel, negotiated over a relay/signaling WebSocket.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use tokio::sync::{mpsc, oneshot};
@@ -69,6 +71,7 @@ impl RtcTransport {
             ice_servers,
             connect_timeout,
             true,
+            None,
         )
     }
 
@@ -86,6 +89,50 @@ impl RtcTransport {
             ice_servers,
             connect_timeout,
             false,
+            None,
+        )
+    }
+
+    /// Like [`Self::connect_as_offerer`], but polls `cancel` while waiting for
+    /// negotiation and aborts with [`RtcError::Cancelled`] once it is set.
+    /// Matters most for the answerer, whose connect timeout can be many
+    /// minutes (it covers a human relaying the room code).
+    pub fn connect_as_offerer_cancellable(
+        relay_url: &str,
+        session_id: &str,
+        my_peer_id: &str,
+        ice_servers: Vec<IceServer>,
+        connect_timeout: Duration,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<Self, RtcError> {
+        Self::connect(
+            relay_url,
+            session_id,
+            my_peer_id,
+            ice_servers,
+            connect_timeout,
+            true,
+            Some(cancel),
+        )
+    }
+
+    /// See [`Self::connect_as_offerer_cancellable`].
+    pub fn connect_as_answerer_cancellable(
+        relay_url: &str,
+        session_id: &str,
+        my_peer_id: &str,
+        ice_servers: Vec<IceServer>,
+        connect_timeout: Duration,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<Self, RtcError> {
+        Self::connect(
+            relay_url,
+            session_id,
+            my_peer_id,
+            ice_servers,
+            connect_timeout,
+            false,
+            Some(cancel),
         )
     }
 
@@ -96,6 +143,7 @@ impl RtcTransport {
         ice_servers: Vec<IceServer>,
         connect_timeout: Duration,
         is_offerer: bool,
+        cancel: Option<Arc<AtomicBool>>,
     ) -> Result<Self, RtcError> {
         let relay_url = relay_url.to_string();
         let session_id = session_id.to_string();
@@ -220,9 +268,39 @@ impl RtcTransport {
             let _ = peer_connection.close().await;
         });
 
-        let outcome = outcome_rx
-            .recv_timeout(connect_timeout)
-            .map_err(|_| RtcError::Timeout)?;
+        // Wait for the background thread's connect outcome in short slices so
+        // a local cancel (user backed out / switched modes) takes effect
+        // promptly instead of after the full connect timeout.
+        let deadline = Instant::now() + connect_timeout;
+        let outcome = loop {
+            match outcome_rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(outcome) => break outcome,
+                Err(std_mpsc::RecvTimeoutError::Timeout) => {
+                    let cancelled = cancel
+                        .as_ref()
+                        .is_some_and(|flag| flag.load(Ordering::Relaxed));
+                    if cancelled || Instant::now() >= deadline {
+                        // The background thread is still mid-negotiation and
+                        // only exits once its outcome send fails or its own
+                        // network timeouts fire. Joining it here could block
+                        // the caller (potentially for minutes), so hand the
+                        // join to a detached reaper thread instead.
+                        drop(outcome_rx);
+                        std::thread::spawn(move || runtime.join());
+                        return Err(if cancelled {
+                            RtcError::Cancelled
+                        } else {
+                            RtcError::Timeout
+                        });
+                    }
+                }
+                Err(std_mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(RtcError::PeerConnection(
+                        "rtc background thread exited before producing a connection".into(),
+                    ));
+                }
+            }
+        };
 
         match outcome {
             ConnectOutcome::Connected {

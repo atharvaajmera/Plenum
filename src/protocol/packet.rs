@@ -23,6 +23,13 @@ pub enum PacketType {
     Finish,
     Close,
     Resume,
+    /// Sender-to-receiver pairing-code proof, sent before `Start` when the
+    /// receiver requires a PIN. Payload: UTF-8 pairing code.
+    Auth,
+    /// Receiver-to-sender go-ahead after the `Start` metadata has been
+    /// approved (auto-accept or user confirmation). The sender must not
+    /// stream `Data` packets until it sees this.
+    Accept,
 }
 
 impl PacketType {
@@ -35,6 +42,8 @@ impl PacketType {
             Self::Finish => 0x05,
             Self::Close => 0x06,
             Self::Resume => 0x07,
+            Self::Auth => 0x08,
+            Self::Accept => 0x09,
         }
     }
 
@@ -47,6 +56,8 @@ impl PacketType {
             0x05 => Ok(Self::Finish),
             0x06 => Ok(Self::Close),
             0x07 => Ok(Self::Resume),
+            0x08 => Ok(Self::Auth),
+            0x09 => Ok(Self::Accept),
             other => Err(ProtocolError::UnknownPacketType(other)),
         }
     }

@@ -12,10 +12,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::app::error::AppError;
 use crate::app::types::{
-    PlenumEvent, BenchmarkEvent, BenchmarkIterationSummary, BenchmarkRequest, BenchmarkSummary,
-    ConnectionState, CorePermissions, DiscoverRequest, DiscoveryEvent, DiscoverySummary, EventSink,
-    LogLevel, PermissionKind, ReceiveRemoteRequest, ReceiveRequest, SendRemoteRequest, SendRequest,
-    TransferDirection, TransferEvent, TransferSummary,
+    AcceptDecision, PlenumEvent, BenchmarkEvent, BenchmarkIterationSummary, BenchmarkRequest,
+    BenchmarkSummary, ConnectionState, CorePermissions, DiscoverRequest, DiscoveryEvent,
+    DiscoverySummary, EventSink, LogLevel, PermissionKind, ReceiveRemoteRequest, ReceiveRequest,
+    SendRemoteRequest, SendRequest, SessionControl, TransferDirection, TransferEvent,
+    TransferSummary,
 };
 use crate::discovery::{Beacon, PairingToken};
 use crate::flow::{ReceiverWindow, SenderWindow};
@@ -25,7 +26,24 @@ use crate::signaling::{RoutedSignal, SignalMessage, SignalingState};
 use crate::stream::{ResumeCheckpoint, chunk_bytes};
 use crate::transport::{MemoryTransport, MemoryTransportConfig, TcpTransport, Transport};
 
-const RESUME_NEGOTIATION_TIMEOUT: Duration = Duration::from_millis(250);
+/// How long the receiver holds an incoming `Start` open waiting for the local
+/// user to accept or decline it (when `auto_accept` is off) before declining.
+const APPROVAL_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// How long the sender waits for the receiver's `Accept` after `Start`.
+/// Slightly longer than [`APPROVAL_TIMEOUT`] so the receiver's own timeout
+/// (which sends an explicit decline) wins the race and the sender gets a
+/// clear "declined" instead of a generic timeout.
+const ACCEPT_WAIT_TIMEOUT: Duration = Duration::from_secs(150);
+
+/// How long the receiver waits for the sender's `Auth` packet when a PIN is
+/// required, before dropping that connection and listening again.
+const AUTH_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Machine-readable reasons carried in a `Close` packet's payload.
+const CLOSE_REASON_DECLINED: &str = "declined";
+const CLOSE_REASON_PIN_REJECTED: &str = "pin_rejected";
+const CLOSE_REASON_CANCELLED: &str = "cancelled";
 
 /// Sender watchdog: abort if packets are awaiting acknowledgement but nothing
 /// has arrived from the receiver for this long. A healthy receiver ACKs every
@@ -40,11 +58,20 @@ const RECEIVE_STALL_TIMEOUT: Duration = Duration::from_secs(45);
 #[derive(Debug, Default)]
 pub struct PlenumCore {
     signaling: SignalingState,
+    control: SessionControl,
 }
 
 impl PlenumCore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The control handle for this core's blocking calls. Clone it *before*
+    /// starting `send_file`/`receive_file`/... on a worker thread; the clone
+    /// can then cancel the session or answer an incoming-file request from
+    /// any other thread.
+    pub fn control(&self) -> SessionControl {
+        self.control.clone()
     }
 
     pub fn send_file<S: EventSink>(
@@ -113,6 +140,8 @@ impl PlenumCore {
             &request.options,
             Some(address),
             started_at,
+            &self.control,
+            request.discovery_token.as_deref(),
         )
     }
 
@@ -140,13 +169,17 @@ impl PlenumCore {
             peer: Some(request.session_id.clone()),
         }));
 
-        let mut transport = RtcTransport::connect_as_offerer(
+        let mut transport = RtcTransport::connect_as_offerer_cancellable(
             &request.relay_server_url,
             &request.session_id,
             &request.my_peer_id,
             request.ice_servers.clone(),
             Duration::from_secs(request.connect_timeout_secs),
-        )?;
+            self.control.cancel_flag(),
+        )
+        .map_err(|error| {
+            rtc_connect_error(error, TransferDirection::Send, sink)
+        })?;
 
         sink.emit(PlenumEvent::Transfer(TransferEvent::StateChanged {
             direction: TransferDirection::Send,
@@ -163,6 +196,9 @@ impl PlenumCore {
             &request.options,
             Some(request.session_id.clone()),
             started_at,
+            &self.control,
+            // Internet transfers have no LAN PIN: the room code is the secret.
+            None,
         )
     }
 
@@ -173,10 +209,15 @@ impl PlenumCore {
     ) -> Result<crate::app::types::TransferSummary, AppError> {
         validate_receive_request(&request)?;
         create_dir_all(&request.output_dir)?;
+        let control = self.control.clone();
+        control.reset_decision();
 
         let listener = TcpListener::bind(format!("0.0.0.0:{}", request.port))?;
+        // Non-blocking so the accept loop below can poll the cancel flag
+        // instead of parking inside `accept()` forever.
+        listener.set_nonblocking(true)?;
         let actual_port = listener.local_addr()?.port();
-        
+
         sink.emit(PlenumEvent::Transfer(TransferEvent::StateChanged {
             direction: TransferDirection::Receive,
             state: ConnectionState::Listening,
@@ -186,7 +227,12 @@ impl PlenumCore {
         let token = PairingToken::generate();
         let broadcast_handle = if request.announce_on_lan {
             let beacon = Beacon::new();
-            let handle = beacon.broadcast(&token, actual_port)?;
+            let handle = beacon.broadcast(
+                &token,
+                actual_port,
+                request.device_name.clone(),
+                request.require_pin,
+            )?;
             sink.emit(PlenumEvent::Discovery(DiscoveryEvent::BroadcastStarted {
                 token: token.code().to_string(),
                 port: actual_port,
@@ -209,35 +255,119 @@ impl PlenumCore {
             None
         };
 
-        let started_at = Instant::now();
-        let tcp_transport = TcpTransport::accept(&listener)?;
-        let peer = tcp_transport.peer_addr()?.to_string();
-        
-        let control_transport = MemoryTransport::new(MemoryTransportConfig::default());
-        let mut transport = crate::transport::MultipathTransport::new(
-            Box::new(tcp_transport),
-            Box::new(control_transport),
-        );
-        
-        sink.emit(PlenumEvent::Transfer(TransferEvent::StateChanged {
-            direction: TransferDirection::Receive,
-            state: ConnectionState::Connected,
-            peer: Some(peer.clone()),
-        }));
+        // Ensure the broadcast thread is stopped on every exit path (cancel,
+        // auth failure, transfer error), not just the happy path.
+        let result =
+            self.accept_and_receive(&request, &listener, &token, &control, &stop_flag, sink);
 
         stop_flag.store(true, Ordering::Relaxed);
         if let Some(thread) = broadcast_thread {
             let _ = thread.join();
         }
 
-        run_receive_transfer(
-            &mut transport,
-            sink,
-            &request.output_dir,
-            &request.options,
-            peer,
-            started_at,
-        )
+        result
+    }
+
+    /// Accept loop + auth gate + transfer for `receive_file`, split out so the
+    /// caller can stop the announce thread regardless of how this exits.
+    fn accept_and_receive<S: EventSink>(
+        &mut self,
+        request: &ReceiveRequest,
+        listener: &TcpListener,
+        token: &PairingToken,
+        control: &SessionControl,
+        announce_stop: &AtomicBool,
+        sink: &mut S,
+    ) -> Result<crate::app::types::TransferSummary, AppError> {
+        // Outer loop: a sender that fails the PIN check is dropped and the
+        // listener keeps accepting, so one bad/mistyped attempt doesn't kill
+        // the whole receive session.
+        loop {
+            let started_at = Instant::now();
+            let stream = loop {
+                if control.is_cancelled() {
+                    sink.emit(PlenumEvent::Transfer(TransferEvent::Cancelled {
+                        direction: TransferDirection::Receive,
+                    }));
+                    return Err(AppError::Cancelled);
+                }
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) =>
+                    {
+                        thread::sleep(Duration::from_millis(25));
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            };
+            // The transfer stream itself uses blocking reads with a short
+            // read timeout (see TcpTransport), not the listener's mode.
+            stream.set_nonblocking(false)?;
+
+            let peer = stream
+                .peer_addr()
+                .map(|addr| addr.to_string())
+                .unwrap_or_else(|_| "unknown".to_string());
+            let tcp_transport = TcpTransport::from_stream(stream)?;
+
+            let control_transport = MemoryTransport::new(MemoryTransportConfig::default());
+            let mut transport = crate::transport::MultipathTransport::new(
+                Box::new(tcp_transport),
+                Box::new(control_transport),
+            );
+
+            // PIN gate: require an Auth packet proving the pairing code
+            // before anything else happens on this connection.
+            if request.require_pin {
+                match verify_sender_auth(&mut transport, token, control) {
+                    Ok(()) => {}
+                    Err(AuthGateOutcome::WrongPin) => {
+                        sink.emit(PlenumEvent::Log {
+                            level: LogLevel::Warn,
+                            message: format!("rejected connection from {peer}: invalid PIN"),
+                        });
+                        let _ = transport.send(&encode_packet(&Packet::new(
+                            PacketType::Close,
+                            0,
+                            CLOSE_REASON_PIN_REJECTED.as_bytes().to_vec(),
+                        ))?);
+                        let _ = transport.close();
+                        continue;
+                    }
+                    Err(AuthGateOutcome::Cancelled) => {
+                        sink.emit(PlenumEvent::Transfer(TransferEvent::Cancelled {
+                            direction: TransferDirection::Receive,
+                        }));
+                        return Err(AppError::Cancelled);
+                    }
+                    Err(AuthGateOutcome::Error(error)) => return Err(error),
+                }
+            }
+
+            sink.emit(PlenumEvent::Transfer(TransferEvent::StateChanged {
+                direction: TransferDirection::Receive,
+                state: ConnectionState::Connected,
+                peer: Some(peer.clone()),
+            }));
+
+            // A sender is committed; stop announcing on the LAN.
+            announce_stop.store(true, Ordering::Relaxed);
+
+            return run_receive_transfer(
+                &mut transport,
+                sink,
+                &request.output_dir,
+                &request.options,
+                peer,
+                started_at,
+                control,
+                request.auto_accept,
+            );
+        }
     }
 
     /// Receives a file over the internet via a relay/signaling server, acting
@@ -250,6 +380,8 @@ impl PlenumCore {
         validate_receive_remote_request(&request)?;
         create_dir_all(&request.output_dir)?;
         let started_at = Instant::now();
+        let control = self.control.clone();
+        control.reset_decision();
 
         sink.emit(PlenumEvent::Transfer(TransferEvent::StateChanged {
             direction: TransferDirection::Receive,
@@ -257,13 +389,17 @@ impl PlenumCore {
             peer: Some(request.session_id.clone()),
         }));
 
-        let mut transport = RtcTransport::connect_as_answerer(
+        let mut transport = RtcTransport::connect_as_answerer_cancellable(
             &request.relay_server_url,
             &request.session_id,
             &request.my_peer_id,
             request.ice_servers.clone(),
             Duration::from_secs(request.connect_timeout_secs),
-        )?;
+            control.cancel_flag(),
+        )
+        .map_err(|error| {
+            rtc_connect_error(error, TransferDirection::Receive, sink)
+        })?;
 
         sink.emit(PlenumEvent::Transfer(TransferEvent::StateChanged {
             direction: TransferDirection::Receive,
@@ -278,6 +414,8 @@ impl PlenumCore {
             &request.options,
             request.session_id.clone(),
             started_at,
+            &control,
+            request.auto_accept,
         )
     }
 
@@ -309,6 +447,7 @@ impl PlenumCore {
                     hostname: announcement.hostname,
                     address,
                     token: announcement.token,
+                    pin_required: announcement.pin_required,
                 };
                 sink.emit(PlenumEvent::Discovery(DiscoveryEvent::PeerFound(
                     summary.clone(),
@@ -612,8 +751,22 @@ fn run_send_transfer<T: Transport, S: EventSink>(
     options: &crate::app::types::TransferOptions,
     peer_label: Option<String>,
     started_at: Instant,
+    control: &SessionControl,
+    pin: Option<&str>,
 ) -> Result<TransferSummary, AppError> {
     let file_name = file_name.to_string();
+
+    // Prove knowledge of the pairing code first: a receiver with
+    // "require PIN" enabled reads this before anything else and drops the
+    // connection if it is missing or wrong. Harmless when not required.
+    if let Some(pin) = pin {
+        transport.send(&encode_packet(&Packet::new(
+            PacketType::Auth,
+            0,
+            pin.trim().as_bytes().to_vec(),
+        ))?)?;
+    }
+
     let mut start_payload = Vec::new();
     start_payload.extend_from_slice(&file_size.to_be_bytes());
     start_payload.extend_from_slice(file_name.as_bytes());
@@ -623,7 +776,17 @@ fn run_send_transfer<T: Transport, S: EventSink>(
         start_payload,
     ))?)?;
 
-    let (mut sequence_no, resume_bytes) = negotiate_resume(transport)?;
+    // The receiver replies with `Accept` once the transfer is approved
+    // (instantly under auto-accept; after a user decision otherwise). Any
+    // `Resume` arrives before the `Accept` on the ordered transport, so no
+    // separate resume-negotiation window is needed afterwards.
+    sink.emit(PlenumEvent::Transfer(TransferEvent::AwaitingApproval {
+        direction: TransferDirection::Send,
+        file_name: file_name.clone(),
+    }));
+    let (mut sequence_no, resume_bytes) =
+        wait_for_accept(transport, control, sink, TransferDirection::Send)?;
+
     if resume_bytes > 0 {
         sink.emit(PlenumEvent::Transfer(TransferEvent::Resumed {
             direction: TransferDirection::Send,
@@ -660,6 +823,21 @@ fn run_send_transfer<T: Transport, S: EventSink>(
     });
 
     loop {
+        // Cooperative cancel: tell the receiver why we're going away (its
+        // checkpoint stays on disk for a later resume), then bail out.
+        if control.is_cancelled() {
+            let _ = transport.send(&encode_packet(&Packet::new(
+                PacketType::Close,
+                sequence_no,
+                CLOSE_REASON_CANCELLED.as_bytes().to_vec(),
+            ))?);
+            let _ = transport.close();
+            sink.emit(PlenumEvent::Transfer(TransferEvent::Cancelled {
+                direction: TransferDirection::Send,
+            }));
+            return Err(AppError::Cancelled);
+        }
+
         let now = now_ms();
         while !file_done && sender.pending_len() < options.window_size * 2 {
             let n = file.read(&mut buffer)?;
@@ -676,10 +854,24 @@ fn run_send_transfer<T: Transport, S: EventSink>(
 
         while let Some(frame) = transport.recv()? {
             last_inbound = Instant::now();
-            let control = parse_packet(&frame)?;
-            if control.packet_type == PacketType::Ack {
+            let ctrl_packet = parse_packet(&frame)?;
+            match ctrl_packet.packet_type {
+                // The receiver bailed mid-transfer (cancel/decline).
+                PacketType::Close => {
+                    let reason = String::from_utf8_lossy(&ctrl_packet.payload).into_owned();
+                    sink.emit(PlenumEvent::Transfer(TransferEvent::Declined {
+                        direction: TransferDirection::Send,
+                        reason: reason.clone(),
+                    }));
+                    return Err(AppError::Rejected(rejection_message(&reason)));
+                }
+                // Late/duplicate handshake packets: not control traffic.
+                PacketType::Accept | PacketType::Resume | PacketType::Auth => continue,
+                _ => {}
+            }
+            if ctrl_packet.packet_type == PacketType::Ack {
                 diag_acks_recv = diag_acks_recv.saturating_add(1);
-                if let Some(size) = ack_sizes.remove(&control.sequence_no) {
+                if let Some(size) = ack_sizes.remove(&ctrl_packet.sequence_no) {
                     bytes_acked = bytes_acked.saturating_add(size as u64);
                     sink.emit(PlenumEvent::Transfer(TransferEvent::Progress {
                         direction: TransferDirection::Send,
@@ -688,7 +880,7 @@ fn run_send_transfer<T: Transport, S: EventSink>(
                     }));
                 }
             }
-            sender.handle_control_packet(&control)?;
+            sender.handle_control_packet(&ctrl_packet)?;
         }
 
         sender.retransmit_due(transport, now)?;
@@ -778,6 +970,8 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
     options: &crate::app::types::TransferOptions,
     peer_label: String,
     started_at: Instant,
+    control: &SessionControl,
+    auto_accept: bool,
 ) -> Result<TransferSummary, AppError> {
     let mut receiver = ReceiverWindow::new();
     let mut file: Option<File> = None;
@@ -800,6 +994,23 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
     });
 
     loop {
+        // Cooperative cancel: tell the sender why we're going away (our
+        // checkpoint stays on disk for a later resume), then bail out.
+        if control.is_cancelled() {
+            if let Ok(bytes) = encode_packet(&Packet::new(
+                PacketType::Close,
+                receiver.next_expected(),
+                CLOSE_REASON_CANCELLED.as_bytes().to_vec(),
+            )) {
+                let _ = transport.send(&bytes);
+            }
+            let _ = transport.close();
+            sink.emit(PlenumEvent::Transfer(TransferEvent::Cancelled {
+                direction: TransferDirection::Receive,
+            }));
+            return Err(AppError::Cancelled);
+        }
+
         // TEMP DIAG: heartbeat every ~1s, even while idle, so we can see whether
         // ANY packet ever reaches the receiver.
         let diag_now = now_ms();
@@ -883,13 +1094,6 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
                 bytes_received = resume_bytes;
                 file_name = clean_name;
 
-                sink.emit(PlenumEvent::Transfer(TransferEvent::Started {
-                    direction: TransferDirection::Receive,
-                    file_name: file_name.clone(),
-                    total_bytes: file_size,
-                    resumed_bytes: resume_bytes,
-                }));
-
                 // TEMP DIAG
                 sink.emit(PlenumEvent::Log {
                     level: LogLevel::Info,
@@ -897,6 +1101,71 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
                         "DIAG recv: START received file={file_name} size={file_size} resume={resume_bytes}"
                     ),
                 });
+
+                // Accept gate: surface the offer to the UI and wait for a
+                // decision before any data flows. Auto-accept (the default,
+                // and the only behaviour desktop/CLI expose) skips the wait.
+                sink.emit(PlenumEvent::Transfer(TransferEvent::IncomingRequest {
+                    direction: TransferDirection::Receive,
+                    file_name: file_name.clone(),
+                    total_bytes: file_size,
+                    peer: Some(peer_label.clone()),
+                }));
+                if !auto_accept {
+                    let deadline = Instant::now() + APPROVAL_TIMEOUT;
+                    loop {
+                        if control.is_cancelled() {
+                            let _ = transport.send(&encode_packet(&Packet::new(
+                                PacketType::Close,
+                                resume_sequence,
+                                CLOSE_REASON_CANCELLED.as_bytes().to_vec(),
+                            ))?);
+                            let _ = transport.close();
+                            sink.emit(PlenumEvent::Transfer(TransferEvent::Cancelled {
+                                direction: TransferDirection::Receive,
+                            }));
+                            return Err(AppError::Cancelled);
+                        }
+                        match control.decision() {
+                            AcceptDecision::Accepted => break,
+                            AcceptDecision::Declined => {
+                                let _ = transport.send(&encode_packet(&Packet::new(
+                                    PacketType::Close,
+                                    resume_sequence,
+                                    CLOSE_REASON_DECLINED.as_bytes().to_vec(),
+                                ))?);
+                                let _ = transport.close();
+                                sink.emit(PlenumEvent::Transfer(TransferEvent::Declined {
+                                    direction: TransferDirection::Receive,
+                                    reason: CLOSE_REASON_DECLINED.to_string(),
+                                }));
+                                return Err(AppError::Rejected(
+                                    "transfer declined".to_string(),
+                                ));
+                            }
+                            AcceptDecision::Pending => {
+                                if Instant::now() >= deadline {
+                                    let _ = transport.send(&encode_packet(&Packet::new(
+                                        PacketType::Close,
+                                        resume_sequence,
+                                        CLOSE_REASON_DECLINED.as_bytes().to_vec(),
+                                    ))?);
+                                    let _ = transport.close();
+                                    sink.emit(PlenumEvent::Transfer(TransferEvent::Declined {
+                                        direction: TransferDirection::Receive,
+                                        reason: CLOSE_REASON_DECLINED.to_string(),
+                                    }));
+                                    return Err(AppError::Rejected(format!(
+                                        "no decision within {}s; transfer declined",
+                                        APPROVAL_TIMEOUT.as_secs()
+                                    )));
+                                }
+                                thread::sleep(Duration::from_millis(50));
+                            }
+                        }
+                    }
+                    control.reset_decision();
+                }
 
                 if resume_bytes > 0 {
                     sink.emit(PlenumEvent::Transfer(TransferEvent::Resumed {
@@ -910,6 +1179,26 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
                         resume_bytes.to_be_bytes().to_vec(),
                     ))?)?;
                 }
+
+                // Go-ahead: the sender blocks in `wait_for_accept` until this
+                // arrives. It is sent after any `Resume` so the ordered
+                // transport delivers the resume offset first.
+                transport.send(&encode_packet(&Packet::new(
+                    PacketType::Accept,
+                    resume_sequence,
+                    Vec::new(),
+                ))?)?;
+
+                sink.emit(PlenumEvent::Transfer(TransferEvent::Started {
+                    direction: TransferDirection::Receive,
+                    file_name: file_name.clone(),
+                    total_bytes: file_size,
+                    resumed_bytes: resume_bytes,
+                }));
+
+                // A human decision may have taken minutes; don't let the
+                // stall watchdog count that time against the sender.
+                last_frame_at = Instant::now();
             }
             PacketType::Data => {
                 diag_data_recv = diag_data_recv.saturating_add(1);
@@ -957,7 +1246,19 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
                 }
                 break;
             }
-            PacketType::Close => break,
+            PacketType::Close => {
+                // The sender bailed mid-transfer (cancel or error). Keep the
+                // checkpoint on disk so a later attempt can resume.
+                let reason = String::from_utf8_lossy(&packet.payload).into_owned();
+                if reason.is_empty() {
+                    break;
+                }
+                sink.emit(PlenumEvent::Transfer(TransferEvent::Declined {
+                    direction: TransferDirection::Receive,
+                    reason: reason.clone(),
+                }));
+                return Err(AppError::Rejected(rejection_message(&reason)));
+            }
             PacketType::Resume => {}
             _ => {}
         }
@@ -999,26 +1300,143 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
     Ok(summary)
 }
 
-fn negotiate_resume<T: Transport>(transport: &mut T) -> Result<(u32, u64), AppError> {
-    let deadline = Instant::now() + RESUME_NEGOTIATION_TIMEOUT;
-    while Instant::now() < deadline {
+/// Why the PIN gate turned a connection away (or failed outright).
+enum AuthGateOutcome {
+    /// No `Auth` packet, a wrong code, or garbage: drop this connection and
+    /// keep listening.
+    WrongPin,
+    /// The local user cancelled the receive session while we waited.
+    Cancelled,
+    /// A transport-level failure that should abort the whole session.
+    Error(AppError),
+}
+
+/// Receiver side of the PIN gate: the first packet on a connection must be an
+/// `Auth` carrying the pairing code when "require PIN" is enabled.
+fn verify_sender_auth<T: Transport>(
+    transport: &mut T,
+    token: &PairingToken,
+    control: &SessionControl,
+) -> Result<(), AuthGateOutcome> {
+    let deadline = Instant::now() + AUTH_WAIT_TIMEOUT;
+    loop {
+        if control.is_cancelled() {
+            return Err(AuthGateOutcome::Cancelled);
+        }
+        match transport.recv() {
+            Ok(Some(frame)) => {
+                // Anything unparsable or anything other than `Auth` first
+                // (e.g. a `Start` from a sender that never prompted for the
+                // code) counts as a failed proof.
+                let Ok(packet) = parse_packet(&frame) else {
+                    return Err(AuthGateOutcome::WrongPin);
+                };
+                if packet.packet_type != PacketType::Auth {
+                    return Err(AuthGateOutcome::WrongPin);
+                }
+                let candidate = String::from_utf8_lossy(&packet.payload).into_owned();
+                return if token.code().eq_ignore_ascii_case(candidate.trim()) {
+                    Ok(())
+                } else {
+                    Err(AuthGateOutcome::WrongPin)
+                };
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    return Err(AuthGateOutcome::WrongPin);
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => return Err(AuthGateOutcome::Error(error.into())),
+        }
+    }
+}
+
+/// Sender side of the accept gate: blocks after `Start` until the receiver's
+/// `Accept` arrives. Any `Resume` is guaranteed by the ordered transport to
+/// arrive first, so this also returns the negotiated resume position as
+/// `(next_sequence, resumed_bytes)`.
+fn wait_for_accept<T: Transport, S: EventSink>(
+    transport: &mut T,
+    control: &SessionControl,
+    sink: &mut S,
+    direction: TransferDirection,
+) -> Result<(u32, u64), AppError> {
+    let deadline = Instant::now() + ACCEPT_WAIT_TIMEOUT;
+    let mut resume_bytes = 0u64;
+    loop {
+        if control.is_cancelled() {
+            let _ = transport.send(&encode_packet(&Packet::new(
+                PacketType::Close,
+                0,
+                CLOSE_REASON_CANCELLED.as_bytes().to_vec(),
+            ))?);
+            let _ = transport.close();
+            sink.emit(PlenumEvent::Transfer(TransferEvent::Cancelled { direction }));
+            return Err(AppError::Cancelled);
+        }
+        if Instant::now() >= deadline {
+            return Err(AppError::Stalled(format!(
+                "receiver did not answer the transfer offer within {}s",
+                ACCEPT_WAIT_TIMEOUT.as_secs()
+            )));
+        }
         match transport.recv()? {
             Some(frame) => {
                 let packet = parse_packet(&frame)?;
-                if packet.packet_type == PacketType::Resume {
-                    if packet.payload.len() != 8 {
-                        return Ok((packet.sequence_no, 0));
+                match packet.packet_type {
+                    // `Accept` carries the resume sequence (0 when starting
+                    // fresh), matching any `Resume` that preceded it.
+                    PacketType::Accept => return Ok((packet.sequence_no, resume_bytes)),
+                    PacketType::Resume => {
+                        resume_bytes = if packet.payload.len() == 8 {
+                            let mut bytes = [0u8; 8];
+                            bytes.copy_from_slice(&packet.payload);
+                            u64::from_be_bytes(bytes)
+                        } else {
+                            0
+                        };
                     }
-                    let mut bytes = [0u8; 8];
-                    bytes.copy_from_slice(&packet.payload);
-                    return Ok((packet.sequence_no, u64::from_be_bytes(bytes)));
+                    // The receiver declined, rejected the PIN, or cancelled.
+                    PacketType::Close => {
+                        let reason = String::from_utf8_lossy(&packet.payload).into_owned();
+                        sink.emit(PlenumEvent::Transfer(TransferEvent::Declined {
+                            direction,
+                            reason: reason.clone(),
+                        }));
+                        return Err(AppError::Rejected(rejection_message(&reason)));
+                    }
+                    _ => {}
                 }
             }
-            None => thread::sleep(Duration::from_millis(5)),
+            None => thread::sleep(Duration::from_millis(20)),
         }
     }
+}
 
-    Ok((0, 0))
+/// Turns a machine-readable `Close` reason into a human-readable message.
+fn rejection_message(reason: &str) -> String {
+    match reason {
+        CLOSE_REASON_DECLINED => "the receiver declined the transfer".to_string(),
+        CLOSE_REASON_PIN_REJECTED => "the receiver rejected the pairing code".to_string(),
+        CLOSE_REASON_CANCELLED => "the peer cancelled the transfer".to_string(),
+        other => format!("the peer closed the connection ({other})"),
+    }
+}
+
+/// Maps an RTC connect failure to an app error, emitting the `Cancelled`
+/// event when the failure was a local cancel rather than a network problem.
+fn rtc_connect_error<S: EventSink>(
+    error: crate::rtc::RtcError,
+    direction: TransferDirection,
+    sink: &mut S,
+) -> AppError {
+    if matches!(error, crate::rtc::RtcError::Cancelled) {
+        sink.emit(PlenumEvent::Transfer(TransferEvent::Cancelled { direction }));
+        AppError::Cancelled
+    } else {
+        AppError::Rtc(error)
+    }
 }
 
 fn resume_checkpoint_path(out_path: &Path) -> PathBuf {
