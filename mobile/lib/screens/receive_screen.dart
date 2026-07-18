@@ -460,9 +460,102 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     }
   }
 
+  Widget _buildCodeCard({
+    required String caption,
+    required String code,
+    required bool copied,
+    required VoidCallback onCopy,
+    VoidCallback? onShare,
+    String? footer,
+  }) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+      decoration: BoxDecoration(
+        color: AppTheme.bgCard,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppTheme.accentPrimary),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            caption,
+            style: const TextStyle(fontSize: 12, color: AppTheme.textSecondary),
+            textAlign: TextAlign.center,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  alignment: Alignment.center,
+                  child: Text(
+                    code,
+                    style: const TextStyle(
+                      fontSize: 26,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 4,
+                      color: AppTheme.accentPrimary,
+                    ),
+                    maxLines: 1,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              GestureDetector(
+                onTap: onCopy,
+                child: Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: AppTheme.bgSidebar,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Icon(
+                    copied ? Icons.check : Icons.copy,
+                    size: 18,
+                    color: copied ? AppTheme.accentPrimary : AppTheme.textSecondary,
+                  ),
+                ),
+              ),
+              if (onShare != null) ...[
+                const SizedBox(width: 6),
+                GestureDetector(
+                  onTap: onShare,
+                  child: Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: AppTheme.bgSidebar,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: const Icon(Icons.share, size: 18, color: AppTheme.textSecondary),
+                  ),
+                ),
+              ],
+            ],
+          ),
+          if (footer != null) ...[
+            const SizedBox(height: 8),
+            Text(
+              footer,
+              style: const TextStyle(fontSize: 12, color: AppTheme.textSecondary),
+              textAlign: TextAlign.center,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      resizeToAvoidBottomInset: false,
       appBar: AppBar(
         title: const Text('Plenum', style: TextStyle(fontWeight: FontWeight.w900, color: AppTheme.accentPrimary, letterSpacing: -0.5)),
         actions: [
@@ -477,209 +570,111 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
           )
         ],
       ),
-      body: Center(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.symmetric(vertical: 24),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
+      body: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
             Row(
-              mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                _ModeChip(
-                  icon: Icons.wifi,
-                  label: 'Local Network',
-                  selected: _mode == TransferMode.local,
-                  onTap: () => _switchMode(TransferMode.local),
+                Expanded(
+                  child: _ModeChip(
+                    icon: Icons.wifi,
+                    label: 'Local Network',
+                    selected: _mode == TransferMode.local,
+                    onTap: () => _switchMode(TransferMode.local),
+                  ),
                 ),
-                const SizedBox(width: 12),
-                _ModeChip(
-                  icon: Icons.public,
-                  label: 'Internet',
-                  selected: _mode == TransferMode.internet,
-                  onTap: () => _switchMode(TransferMode.internet),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: _ModeChip(
+                    icon: Icons.public,
+                    label: 'Internet',
+                    selected: _mode == TransferMode.internet,
+                    onTap: () => _switchMode(TransferMode.internet),
+                  ),
                 ),
               ],
             ),
-            const SizedBox(height: 32),
-
-            if (_mode == TransferMode.local)
-              GestureDetector(
-                onTap: _isListening ? null : _startLocalReceiver,
-                child: AnimatedRadar(isListening: _isListening),
-              )
-            else
-              GestureDetector(
-                onTap: _remoteStarted ? null : _setupRemoteReceiver,
-                child: AnimatedRadar(isListening: _remoteStarted),
+            Expanded(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  GestureDetector(
+                    onTap: _mode == TransferMode.local
+                        ? (_isListening ? null : _startLocalReceiver)
+                        : (_remoteStarted ? null : _setupRemoteReceiver),
+                    child: AnimatedRadar(
+                      isListening: _mode == TransferMode.local ? _isListening : _remoteStarted,
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Text(
+                    _statusMessage,
+                    style: const TextStyle(fontSize: 15, color: AppTheme.textSecondary),
+                    textAlign: TextAlign.center,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  if (_isListening || _remoteStarted)
+                    TextButton.icon(
+                      onPressed: _stopReceiving,
+                      style: TextButton.styleFrom(
+                        visualDensity: VisualDensity.compact,
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      ),
+                      icon: const Icon(Icons.stop_circle, color: AppTheme.accentPrimary, size: 18),
+                      label: const Text('Stop Receiving', style: TextStyle(color: AppTheme.accentPrimary)),
+                    ),
+                  if (_statusMessage.startsWith('Error:'))
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: ElevatedButton.icon(
+                        onPressed: () {
+                          _stopReceiving();
+                          if (_mode == TransferMode.local) {
+                            _startLocalReceiver();
+                          } else {
+                            _setupRemoteReceiver();
+                          }
+                        },
+                        icon: const Icon(Icons.refresh),
+                        label: const Text('Retry'),
+                      ),
+                    ),
+                ],
               ),
-
-            const SizedBox(height: 40),
-            Text(
-              _statusMessage,
-              style: const TextStyle(fontSize: 16, color: AppTheme.textSecondary),
-              textAlign: TextAlign.center,
             ),
-            
-            if (_isListening || _remoteStarted)
-              Padding(
-                padding: const EdgeInsets.only(top: 8),
-                child: TextButton.icon(
-                  onPressed: _stopReceiving,
-                  icon: const Icon(Icons.stop_circle, color: AppTheme.accentPrimary),
-                  label: const Text('Stop Receiving', style: TextStyle(color: AppTheme.accentPrimary)),
-                ),
-              ),
-
-            if (_statusMessage.startsWith('Error:'))
-              Padding(
-                padding: const EdgeInsets.only(top: 8),
-                child: ElevatedButton.icon(
-                  onPressed: () {
-                    _stopReceiving();
-                    if (_mode == TransferMode.local) {
-                      _startLocalReceiver();
-                    } else {
-                      _setupRemoteReceiver();
-                    }
-                  },
-                  icon: const Icon(Icons.refresh),
-                  label: const Text('Retry'),
-                ),
-              ),
-
             if (_mode == TransferMode.local && _pin != null)
-              Container(
-                margin: const EdgeInsets.only(top: 24),
-                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-                decoration: BoxDecoration(
-                  color: AppTheme.bgCard,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: AppTheme.accentPrimary, width: 1, style: BorderStyle.solid),
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      _requirePinActive
-                          ? 'PIN required — senders must enter this code'
-                          : 'Pairing code — senders can use this to find you',
-                      style: const TextStyle(fontSize: 12, color: AppTheme.textSecondary),
-                      textAlign: TextAlign.center,
-                    ),
-                    const SizedBox(height: 8),
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          _pin!,
-                          style: const TextStyle(
-                            fontSize: 28,
-                            fontWeight: FontWeight.bold,
-                            letterSpacing: 6,
-                            color: AppTheme.accentPrimary
-                          )
-                        ),
-                        const SizedBox(width: 16),
-                        GestureDetector(
-                          onTap: _copyPin,
-                          child: Container(
-                            padding: const EdgeInsets.all(8),
-                            decoration: BoxDecoration(
-                              color: AppTheme.bgSidebar,
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                            child: Icon(
-                              _copied ? Icons.check : Icons.copy,
-                              size: 20,
-                              color: _copied ? AppTheme.accentPrimary : AppTheme.textSecondary,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                    if (_localAddress != null) ...[
-                      const SizedBox(height: 12),
-                      Text('Your address: $_localAddress', style: const TextStyle(fontSize: 12, color: AppTheme.textSecondary)),
-                    ],
-                  ],
-                ),
+              _buildCodeCard(
+                caption: _requirePinActive
+                    ? 'PIN required — senders must enter this code'
+                    : 'Pairing code — senders can use this to find you',
+                code: _pin!,
+                copied: _copied,
+                onCopy: _copyPin,
+                footer: _localAddress != null ? 'Your address: $_localAddress' : null,
               ),
-
             if (_mode == TransferMode.internet && _roomCode != null)
-              Container(
-                margin: const EdgeInsets.only(top: 24),
-                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-                decoration: BoxDecoration(
-                  color: AppTheme.bgCard,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: AppTheme.accentPrimary, width: 1),
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Text('Room Code', style: TextStyle(fontSize: 12, color: AppTheme.textSecondary)),
-                    const SizedBox(height: 8),
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          _roomCode!,
-                          style: const TextStyle(
-                            fontSize: 28,
-                            fontWeight: FontWeight.bold,
-                            letterSpacing: 6,
-                            color: AppTheme.accentPrimary
-                          )
-                        ),
-                        const SizedBox(width: 16),
-                        GestureDetector(
-                          onTap: _copyRoomCode,
-                          child: Container(
-                            padding: const EdgeInsets.all(8),
-                            decoration: BoxDecoration(
-                              color: AppTheme.bgSidebar,
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                            child: Icon(
-                              _roomCodeCopied ? Icons.check : Icons.copy,
-                              size: 20,
-                              color: _roomCodeCopied ? AppTheme.accentPrimary : AppTheme.textSecondary,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        GestureDetector(
-                          onTap: () {
-                            Share.share('Use this code to send files on Plenum: $_roomCode');
-                          },
-                          child: Container(
-                            padding: const EdgeInsets.all(8),
-                            decoration: BoxDecoration(
-                              color: AppTheme.bgSidebar,
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                            child: const Icon(Icons.share, size: 20, color: AppTheme.textSecondary),
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 12),
-                    const Text('Code valid while this screen is open', style: TextStyle(fontSize: 12, color: AppTheme.textSecondary)),
-                  ],
-                ),
+              _buildCodeCard(
+                caption: 'Room Code',
+                code: _roomCode!,
+                copied: _roomCodeCopied,
+                onCopy: _copyRoomCode,
+                onShare: () => Share.share('Use this code to send files on Plenum: $_roomCode'),
+                footer: 'Code valid while this screen is open',
               ),
-
-            if (_progress != null)
+            if (_progress != null) ...[
+              const SizedBox(height: 8),
               Container(
-                margin: const EdgeInsets.only(top: 24),
-                padding: const EdgeInsets.all(16),
-                width: 300,
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
                   color: AppTheme.bgSidebar,
                   borderRadius: BorderRadius.circular(12),
                 ),
                 child: Column(
+                  mainAxisSize: MainAxisSize.min,
                   children: [
                     ClipRRect(
                       borderRadius: BorderRadius.circular(4),
@@ -690,43 +685,53 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                         valueColor: const AlwaysStoppedAnimation<Color>(AppTheme.accentPrimary),
                       ),
                     ),
-                    const SizedBox(height: 8),
+                    const SizedBox(height: 6),
                     Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
                         Text(
                           '${(_progress! * 100).toStringAsFixed(1)}%',
                           style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12),
                         ),
-                        if (_speedText != null && _etaText != null)
-                          Text(
-                            '$_speedText • $_etaText',
-                            style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+                        if (_speedText != null && _etaText != null) ...[
+                          const Spacer(),
+                          Flexible(
+                            child: Text(
+                              '$_speedText • $_etaText',
+                              style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+                              overflow: TextOverflow.ellipsis,
+                              textAlign: TextAlign.end,
+                            ),
                           ),
+                        ],
                       ],
                     ),
                     if (_progress == 1.0 && _savedFilePath != null) ...[
-                      const SizedBox(height: 16),
+                      const SizedBox(height: 8),
                       Text(
                         _savedLocation != null ? 'Saved to $_savedLocation' : 'Saving to Downloads...',
                         style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+                        textAlign: TextAlign.center,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
                       ),
-                      const SizedBox(height: 16),
+                      const SizedBox(height: 8),
                       Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          ElevatedButton(
-                            onPressed: () => OpenFilex.open(_savedFilePath!),
-                            child: const Text('Open'),
+                          Expanded(
+                            child: ElevatedButton(
+                              onPressed: () => OpenFilex.open(_savedFilePath!),
+                              child: const Text('Open'),
+                            ),
                           ),
                           const SizedBox(width: 8),
-                          ElevatedButton(
-                            onPressed: () => Share.shareXFiles([XFile(_savedFilePath!)]),
-                            child: const Text('Share'),
+                          Expanded(
+                            child: ElevatedButton(
+                              onPressed: () => Share.shareXFiles([XFile(_savedFilePath!)]),
+                              child: const Text('Share'),
+                            ),
                           ),
                         ],
                       ),
-                      const SizedBox(height: 8),
                       TextButton(
                         onPressed: () {
                           _stopReceiving();
@@ -736,14 +741,18 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                             _setupRemoteReceiver();
                           }
                         },
+                        style: TextButton.styleFrom(
+                          visualDensity: VisualDensity.compact,
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        ),
                         child: const Text('Receive another'),
                       ),
-                    ]
+                    ],
                   ],
                 ),
               ),
+            ],
           ],
-        ),
         ),
       ),
     );
@@ -763,18 +772,30 @@ class _ModeChip extends StatelessWidget {
     return GestureDetector(
       onTap: onTap,
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
         decoration: BoxDecoration(
           color: AppTheme.bgCard,
           borderRadius: BorderRadius.circular(20),
           border: Border.all(color: selected ? AppTheme.accentPrimary : AppTheme.borderColor, width: selected ? 2 : 1),
         ),
         child: Row(
-          mainAxisSize: MainAxisSize.min,
+          mainAxisAlignment: MainAxisAlignment.center,
           children: [
             Icon(icon, size: 16, color: selected ? AppTheme.accentPrimary : AppTheme.textSecondary),
             const SizedBox(width: 6),
-            Text(label, style: TextStyle(color: selected ? AppTheme.accentPrimary : AppTheme.textSecondary, fontWeight: FontWeight.w600, fontSize: 12)),
+            Flexible(
+              child: Text(
+                label,
+                style: TextStyle(
+                  color: selected ? AppTheme.accentPrimary : AppTheme.textSecondary,
+                  fontWeight: FontWeight.w600,
+                  fontSize: 12,
+                ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
           ],
         ),
       ),

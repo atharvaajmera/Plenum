@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:package_info_plus/package_info_plus.dart';
 import '../theme.dart';
 import '../services/settings_service.dart';
+import 'about_screen.dart';
 import 'transfer_history_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -13,21 +13,6 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
-  String _appVersion = 'Loading...';
-
-  @override
-  void initState() {
-    super.initState();
-    _loadVersion();
-  }
-
-  Future<void> _loadVersion() async {
-    final info = await PackageInfo.fromPlatform();
-    setState(() {
-      _appVersion = '${info.version}+${info.buildNumber}';
-    });
-  }
-
   void _editDeviceName(SettingsService settings) {
     final controller = TextEditingController(text: settings.deviceName);
     showDialog(
@@ -48,40 +33,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
           TextButton(
             onPressed: () {
               settings.setDeviceName(controller.text.trim());
-              Navigator.pop(context);
-            },
-            child: const Text('Save', style: TextStyle(color: AppTheme.accentPrimary)),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _editRelayConfig(SettingsService settings, bool isUrl) {
-    final controller = TextEditingController(text: isUrl ? settings.relayServerUrl : settings.iceServers);
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: AppTheme.bgCard,
-        title: Text(isUrl ? 'Relay Server URL' : 'ICE Servers (STUN/TURN)', style: const TextStyle(color: AppTheme.textPrimary)),
-        content: TextField(
-          controller: controller,
-          maxLines: isUrl ? 1 : 4,
-          style: const TextStyle(color: AppTheme.textPrimary),
-          decoration: const InputDecoration(
-            enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: AppTheme.borderColor)),
-            focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: AppTheme.accentPrimary)),
-          ),
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel', style: TextStyle(color: AppTheme.textSecondary))),
-          TextButton(
-            onPressed: () {
-              if (isUrl) {
-                settings.setRelayServerUrl(controller.text.trim());
-              } else {
-                settings.setIceServers(controller.text.trim());
-              }
               Navigator.pop(context);
             },
             child: const Text('Save', style: TextStyle(color: AppTheme.accentPrimary)),
@@ -127,14 +78,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
               activeColor: AppTheme.accentPrimary,
               onChanged: settings.setAutoAccept,
             ),
-            _divider(),
-            const ListTile(
-              title: Text('Save Location', style: TextStyle(color: AppTheme.textPrimary)),
-              subtitle: Text('Saved to Downloads after transfer', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
-              trailing: Icon(Icons.folder, color: AppTheme.textSecondary, size: 20),
-            ),
           ]),
-          
+
           const SizedBox(height: 24),
           const Text('Preferences', style: TextStyle(fontWeight: FontWeight.w600, color: AppTheme.textPrimary, fontSize: 14)),
           const SizedBox(height: 16),
@@ -189,37 +134,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ]),
 
           const SizedBox(height: 24),
-          const Text('Advanced', style: TextStyle(fontWeight: FontWeight.w600, color: AppTheme.textPrimary, fontSize: 14)),
-          const SizedBox(height: 16),
-          _buildCard([
-            ExpansionTile(
-              title: const Text('Network Configuration', style: TextStyle(color: AppTheme.textPrimary)),
-              collapsedIconColor: AppTheme.textSecondary,
-              iconColor: AppTheme.accentPrimary,
-              children: [
-                ListTile(
-                  title: const Text('Relay Server URL', style: TextStyle(color: AppTheme.textPrimary, fontSize: 13)),
-                  subtitle: Text(settings.relayServerUrl, style: const TextStyle(color: AppTheme.textSecondary, fontSize: 11)),
-                  trailing: const Icon(Icons.edit, color: AppTheme.textSecondary, size: 16),
-                  onTap: () => _editRelayConfig(settings, true),
-                ),
-                ListTile(
-                  title: const Text('ICE Servers', style: TextStyle(color: AppTheme.textPrimary, fontSize: 13)),
-                  subtitle: Text(settings.iceServers.replaceAll('\n', ', '), style: const TextStyle(color: AppTheme.textSecondary, fontSize: 11), maxLines: 1, overflow: TextOverflow.ellipsis),
-                  trailing: const Icon(Icons.edit, color: AppTheme.textSecondary, size: 16),
-                  onTap: () => _editRelayConfig(settings, false),
-                ),
-              ],
-            )
-          ]),
-
-          const SizedBox(height: 24),
           const Text('About', style: TextStyle(fontWeight: FontWeight.w600, color: AppTheme.textPrimary, fontSize: 14)),
           const SizedBox(height: 16),
           _buildCard([
             ListTile(
-              title: const Text('Plenum Mobile', style: TextStyle(color: AppTheme.textPrimary)),
-              subtitle: Text('Version $_appVersion', style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+              title: const Text('About Plenum', style: TextStyle(color: AppTheme.textPrimary)),
+              subtitle: const Text('Version, how transfers work, save location', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+              trailing: const Icon(Icons.chevron_right, color: AppTheme.textSecondary),
+              onTap: () {
+                Navigator.push(context, MaterialPageRoute(builder: (context) => const AboutScreen()));
+              },
             ),
           ]),
           const SizedBox(height: 32),

@@ -509,33 +509,35 @@ class _SendScreenState extends State<SendScreen> {
     if (_selectedFile != null) {
       return Container(
         width: double.infinity,
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
         decoration: BoxDecoration(
           color: AppTheme.bgCard,
-          borderRadius: BorderRadius.circular(16),
+          borderRadius: BorderRadius.circular(12),
           border: Border.all(color: AppTheme.accentPrimary),
         ),
         child: Row(
           children: [
-            const Icon(Icons.insert_drive_file, color: AppTheme.accentPrimary, size: 32),
-            const SizedBox(width: 16),
+            const Icon(Icons.insert_drive_file, color: AppTheme.accentPrimary, size: 28),
+            const SizedBox(width: 12),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
                     _selectedFile!.split(RegExp(r'[\\/]')).last,
-                    style: const TextStyle(fontWeight: FontWeight.w600, color: AppTheme.textPrimary),
+                    style: const TextStyle(fontWeight: FontWeight.w600, color: AppTheme.textPrimary, fontSize: 14),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                   ),
-                  const SizedBox(height: 4),
-                  if (_selectedFileSize != null)
+                  if (_selectedFileSize != null) ...[
+                    const SizedBox(height: 2),
                     Text(formatBytes(_selectedFileSize!), style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+                  ],
                 ],
               ),
             ),
             IconButton(
+              visualDensity: VisualDensity.compact,
               icon: const Icon(Icons.close, color: AppTheme.textSecondary),
               onPressed: () {
                 setState(() {
@@ -553,31 +555,24 @@ class _SendScreenState extends State<SendScreen> {
       onTap: _pickFile,
       child: Container(
         width: double.infinity,
-        padding: const EdgeInsets.symmetric(vertical: 32),
+        padding: const EdgeInsets.symmetric(vertical: 14),
         decoration: BoxDecoration(
           gradient: const LinearGradient(
             begin: Alignment.topLeft,
             end: Alignment.bottomRight,
             colors: [AppTheme.bgCard, Color(0xFF1E2835)],
           ),
-          borderRadius: BorderRadius.circular(16),
+          borderRadius: BorderRadius.circular(12),
           border: Border.all(color: AppTheme.borderColor),
-          boxShadow: [
-            BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 6, offset: const Offset(0, 4))
-          ],
         ),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
+        child: const Column(
+          mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(
-              Icons.upload_file,
-              size: 48,
-              color: AppTheme.textSecondary,
-            ),
-            const SizedBox(height: 16),
-            const Text(
+            Icon(Icons.upload_file, size: 32, color: AppTheme.textSecondary),
+            SizedBox(height: 8),
+            Text(
               'Select File to Send',
-              style: TextStyle(fontWeight: FontWeight.w600, fontSize: 16, color: AppTheme.textPrimary),
+              style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14, color: AppTheme.textPrimary),
             ),
           ],
         ),
@@ -588,22 +583,29 @@ class _SendScreenState extends State<SendScreen> {
   Widget _buildStatusCard() {
     if (_transferStatus.isEmpty) return const SizedBox.shrink();
     return Container(
-      margin: const EdgeInsets.only(top: 16),
-      padding: const EdgeInsets.all(16),
+      margin: const EdgeInsets.only(top: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
         color: AppTheme.bgSidebar,
         borderRadius: BorderRadius.circular(12),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Text(_transferStatus, style: const TextStyle(color: AppTheme.textPrimary, fontSize: 14), textAlign: TextAlign.center),
+          Text(
+            _transferStatus,
+            style: const TextStyle(color: AppTheme.textPrimary, fontSize: 13),
+            textAlign: TextAlign.center,
+            maxLines: 3,
+            overflow: TextOverflow.ellipsis,
+          ),
           if (_isConnectingRemote) ...[
-            const SizedBox(height: 12),
-            const Center(child: CircularProgressIndicator(color: AppTheme.accentPrimary)),
+            const SizedBox(height: 8),
+            const Center(child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: AppTheme.accentPrimary))),
           ],
           if (_progress != null) ...[
-            const SizedBox(height: 12),
+            const SizedBox(height: 8),
             ClipRRect(
               borderRadius: BorderRadius.circular(4),
               child: LinearProgressIndicator(
@@ -612,34 +614,43 @@ class _SendScreenState extends State<SendScreen> {
                 valueColor: const AlwaysStoppedAnimation<Color>(AppTheme.accentPrimary),
               ),
             ),
-            const SizedBox(height: 8),
+            const SizedBox(height: 6),
             Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 Text(
                   '${(_progress! * 100).toStringAsFixed(1)}%',
                   style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12),
                 ),
-                if (_speedText != null && _etaText != null)
-                  Text(
-                    '$_speedText • $_etaText',
-                    style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+                if (_speedText != null && _etaText != null) ...[
+                  const Spacer(),
+                  Flexible(
+                    child: Text(
+                      '$_speedText • $_etaText',
+                      style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+                      overflow: TextOverflow.ellipsis,
+                      textAlign: TextAlign.end,
+                    ),
                   ),
+                ],
               ],
             ),
           ],
           if (_transferActive && _progress != 1.0)
             Padding(
-              padding: const EdgeInsets.only(top: 12),
+              padding: const EdgeInsets.only(top: 4),
               child: TextButton.icon(
                 onPressed: _cancelTransfer,
+                style: TextButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
                 icon: const Icon(Icons.cancel, color: AppTheme.accentPrimary, size: 18),
                 label: const Text('Cancel transfer', style: TextStyle(color: AppTheme.accentPrimary)),
               ),
             ),
           if (_progress == 1.0)
             Padding(
-              padding: const EdgeInsets.only(top: 16),
+              padding: const EdgeInsets.only(top: 8),
               child: ElevatedButton(
                 onPressed: () {
                   setState(() {
@@ -661,63 +672,62 @@ class _SendScreenState extends State<SendScreen> {
   }
 
   Widget _buildInternetPanel() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-            const Text('Connect via room code', style: TextStyle(fontWeight: FontWeight.w600, color: AppTheme.textPrimary, fontSize: 14)),
-            const SizedBox(height: 16),
-            Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: _roomCodeController,
-                    textCapitalization: TextCapitalization.characters,
-                    decoration: const InputDecoration(
-                      hintText: 'Enter room code',
-                      border: OutlineInputBorder(),
-                      focusedBorder: OutlineInputBorder(borderSide: BorderSide(color: AppTheme.accentPrimary)),
-                    ),
-                    style: const TextStyle(color: AppTheme.textPrimary, letterSpacing: 2),
-                    onSubmitted: (_) => _handleRoomCodeConnect(),
+    return Expanded(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const Text('Connect via room code', style: TextStyle(fontWeight: FontWeight.w600, color: AppTheme.textPrimary, fontSize: 14)),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _roomCodeController,
+                  textCapitalization: TextCapitalization.characters,
+                  decoration: const InputDecoration(
+                    isDense: true,
+                    hintText: 'Enter room code',
+                    border: OutlineInputBorder(),
+                    focusedBorder: OutlineInputBorder(borderSide: BorderSide(color: AppTheme.accentPrimary)),
+                    contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 12),
                   ),
+                  style: const TextStyle(color: AppTheme.textPrimary, letterSpacing: 2),
+                  onSubmitted: (_) => _handleRoomCodeConnect(),
                 ),
-                const SizedBox(width: 8),
-                IconButton(
-                  icon: const Icon(Icons.paste, color: AppTheme.accentPrimary),
-                  onPressed: () async {
-                    final data = await Clipboard.getData(Clipboard.kTextPlain);
-                    if (data != null && data.text != null) {
-                      _roomCodeController.text = data.text!;
-                    }
-                  },
-                ),
-                const SizedBox(width: 8),
-                ElevatedButton(
-                  onPressed: _isConnectingRemote ? null : _handleRoomCodeConnect,
-                  child: const Text('Connect'),
-                ),
-              ],
-            ),
-            _buildStatusCard(),
-            const SizedBox(height: 32),
-            const Text(
-              'Ask the receiver for their room code, then tap Connect to send over the internet.',
-              style: TextStyle(fontSize: 13, color: AppTheme.textSecondary),
-              textAlign: TextAlign.center,
-            ),
-          ],
+              ),
+              const SizedBox(width: 8),
+              ElevatedButton(
+                onPressed: _isConnectingRemote ? null : _handleRoomCodeConnect,
+                child: const Text('Connect'),
+              ),
+            ],
+          ),
+          _buildStatusCard(),
+          const Spacer(),
+          const Text(
+            'Ask the receiver for their room code, then tap Connect to send over the internet.',
+            style: TextStyle(fontSize: 12, color: AppTheme.textSecondary),
+            textAlign: TextAlign.center,
+          ),
+        ],
+      ),
     );
   }
 
   Widget _buildLocalPanel() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
+    return Expanded(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
           Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text('Discovered Devices', style: TextStyle(fontWeight: FontWeight.w600, color: AppTheme.textPrimary, fontSize: 14)),
+              const Expanded(
+                child: Text('Discovered Devices', style: TextStyle(fontWeight: FontWeight.w600, color: AppTheme.textPrimary, fontSize: 14)),
+              ),
               IconButton(
+                visualDensity: VisualDensity.compact,
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
                 icon: _isDiscovering
                     ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: AppTheme.accentPrimary))
                     : const Icon(Icons.refresh, color: AppTheme.accentPrimary),
@@ -725,93 +735,97 @@ class _SendScreenState extends State<SendScreen> {
               ),
             ],
           ),
-          const SizedBox(height: 16),
-
-          if (_peers.isEmpty)
-            if (_isDiscovering)
-              const Center(child: Padding(
-                padding: EdgeInsets.all(32.0),
-                child: CircularProgressIndicator(color: AppTheme.accentPrimary),
-              ))
-            else
-              Center(child: Padding(
-                padding: const EdgeInsets.all(32.0),
-                child: Column(
-                  children: [
-                    const Text('No devices found.', textAlign: TextAlign.center, style: TextStyle(color: AppTheme.textSecondary)),
-                    const SizedBox(height: 16),
-                    ElevatedButton(
-                      onPressed: _startDiscovery,
-                      child: const Text('Search again'),
-                    ),
-                  ],
-                ),
-              )),
-
-          ListView.separated(
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            itemCount: _peers.length,
-              separatorBuilder: (context, index) => const SizedBox(height: 12),
-              itemBuilder: (context, index) {
-                final peer = _peers[index];
-                return Container(
-                  decoration: BoxDecoration(
-                    color: AppTheme.bgCard,
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: AppTheme.borderColor),
-                  ),
-                  child: ListTile(
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                    onTap: () {
-                      if (_selectedFile == null) {
-                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Please select a file first')));
-                        return;
-                      }
-                      _showPinDialog(
-                        peer['address'],
-                        peer['hostname'] ?? 'Unknown Device',
-                        pinRequired: peer['pin_required'] == true,
+          Expanded(
+            child: _peers.isEmpty
+                ? (_isDiscovering
+                    ? const Center(child: CircularProgressIndicator(color: AppTheme.accentPrimary))
+                    : Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Text(
+                              'No devices found.',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(color: AppTheme.textSecondary),
+                            ),
+                            const SizedBox(height: 12),
+                            ElevatedButton(
+                              onPressed: _startDiscovery,
+                              child: const Text('Search again'),
+                            ),
+                          ],
+                        ),
+                      ))
+                : ListView.separated(
+                    padding: EdgeInsets.zero,
+                    itemCount: _peers.length,
+                    separatorBuilder: (context, index) => const SizedBox(height: 8),
+                    itemBuilder: (context, index) {
+                      final peer = _peers[index];
+                      return Container(
+                        decoration: BoxDecoration(
+                          color: AppTheme.bgCard,
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: AppTheme.borderColor),
+                        ),
+                        child: ListTile(
+                          dense: true,
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                          onTap: () {
+                            if (_selectedFile == null) {
+                              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Please select a file first')));
+                              return;
+                            }
+                            _showPinDialog(
+                              peer['address'],
+                              peer['hostname'] ?? 'Unknown Device',
+                              pinRequired: peer['pin_required'] == true,
+                            );
+                          },
+                          leading: Container(
+                            padding: const EdgeInsets.all(8),
+                            decoration: BoxDecoration(
+                              color: AppTheme.bgSidebar,
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: const Icon(Icons.computer, color: AppTheme.accentPrimary, size: 22),
+                          ),
+                          title: Text(
+                            peer['hostname'] ?? 'Unknown Device',
+                            style: const TextStyle(fontWeight: FontWeight.w600, color: AppTheme.textPrimary),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          subtitle: Text(
+                            peer['address'] ?? '',
+                            style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          trailing: const Icon(Icons.send_rounded, color: AppTheme.accentPrimary),
+                        ),
                       );
                     },
-
-                    leading: Container(
-                      padding: const EdgeInsets.all(10),
-                      decoration: BoxDecoration(
-                        color: AppTheme.bgSidebar,
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: const Icon(Icons.computer, color: AppTheme.accentPrimary),
-                    ),
-                    title: Text(peer['hostname'] ?? 'Unknown Device', style: const TextStyle(fontWeight: FontWeight.w600, color: AppTheme.textPrimary)),
-                    subtitle: Text(peer['address'] ?? '', style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
-                    trailing: const Icon(Icons.send_rounded, color: AppTheme.accentPrimary),
                   ),
-                );
-              },
-            ),
-
+          ),
           _buildStatusCard(),
-
-          const SizedBox(height: 16),
-          Center(
-            child: Column(
-              children: [
-                const Text(
-                  'Please ensure that the desired target is also on the same Wi-Fi network.',
-                  style: TextStyle(fontSize: 13, color: AppTheme.textSecondary),
-                  textAlign: TextAlign.center,
-                ),
-              ],
-            ),
+          const SizedBox(height: 6),
+          const Text(
+            'Please ensure that the desired target is also on the same Wi-Fi network.',
+            style: TextStyle(fontSize: 11, color: AppTheme.textSecondary, height: 1.3),
+            textAlign: TextAlign.center,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
           ),
         ],
+      ),
     );
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      resizeToAvoidBottomInset: false,
       appBar: AppBar(
         title: const Text('Plenum', style: TextStyle(fontWeight: FontWeight.w900, color: AppTheme.accentPrimary, letterSpacing: -0.5)),
         actions: [
@@ -826,15 +840,15 @@ class _SendScreenState extends State<SendScreen> {
           )
         ],
       ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(24.0),
+      body: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             _buildModeToggle(),
-            const SizedBox(height: 24),
+            const SizedBox(height: 10),
             _buildFilePicker(),
-            const SizedBox(height: 32),
+            const SizedBox(height: 10),
             _mode == TransferMode.local ? _buildLocalPanel() : _buildInternetPanel(),
           ],
         ),
@@ -856,7 +870,7 @@ class _ModeCard extends StatelessWidget {
     return GestureDetector(
       onTap: onTap,
       child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 16),
+        padding: const EdgeInsets.symmetric(vertical: 12),
         decoration: BoxDecoration(
           color: AppTheme.bgCard,
           borderRadius: BorderRadius.circular(12),
@@ -864,9 +878,9 @@ class _ModeCard extends StatelessWidget {
         ),
         child: Column(
           children: [
-            Icon(icon, color: selected ? AppTheme.accentPrimary : AppTheme.textSecondary),
-            const SizedBox(height: 8),
-            Text(label, style: TextStyle(color: selected ? AppTheme.accentPrimary : AppTheme.textSecondary, fontWeight: FontWeight.w600, fontSize: 13)),
+            Icon(icon, color: selected ? AppTheme.accentPrimary : AppTheme.textSecondary, size: 22),
+            const SizedBox(height: 6),
+            Text(label, style: TextStyle(color: selected ? AppTheme.accentPrimary : AppTheme.textSecondary, fontWeight: FontWeight.w600, fontSize: 12)),
           ],
         ),
       ),
