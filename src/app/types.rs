@@ -6,8 +6,6 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use serde::{Deserialize, Serialize};
 
-/// Pending/accept/decline state of an incoming-transfer approval (see
-/// [`SessionControl`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AcceptDecision {
     Pending,
@@ -15,23 +13,9 @@ pub enum AcceptDecision {
     Declined,
 }
 
-/// Shared, thread-safe control handle for one engine session.
-///
-/// Engine calls (`send_file`, `receive_file`, ...) are blocking and
-/// run-to-completion; this handle is the side channel a UI thread uses to
-/// influence them while they run:
-///
-/// - `cancel()` — cooperative cancellation. The transfer/listen loops poll
-///   [`Self::is_cancelled`] and abort with [`crate::app::AppError::Cancelled`].
-/// - `accept()` / `decline()` — resolves the incoming-file approval gate the
-///   receiver blocks on after emitting `TransferEvent::IncomingRequest`.
-///
-/// Obtain it via [`crate::app::engine::PlenumCore::control`] before starting
-/// the blocking call (it is `Clone`; all clones share state).
-#[derive(Debug, Clone, Default)]
+
 pub struct SessionControl {
     cancelled: Arc<AtomicBool>,
-    /// 0 = pending, 1 = accepted, 2 = declined.
     decision: Arc<AtomicU8>,
 }
 
@@ -64,14 +48,10 @@ impl SessionControl {
         }
     }
 
-    /// Clears a previous accept/decline so the next incoming file on the same
-    /// session prompts again.
     pub fn reset_decision(&self) {
         self.decision.store(0, Ordering::Relaxed);
     }
 
-    /// Raw cancellation flag, for layers (e.g. `crate::rtc`) that must not
-    /// depend on app types.
     pub fn cancel_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.cancelled)
     }
@@ -127,14 +107,8 @@ pub struct TransferOptions {
 impl Default for TransferOptions {
     fn default() -> Self {
         Self {
-            chunk_size: 32 * 1024,
-            window_size: 128,
-            // Milliseconds before an unacknowledged packet is retransmitted.
-            // Deliberately generous: the WebRTC data channel is already
-            // reliable/ordered, so retransmission at this layer only matters
-            // for genuinely lost connections. An aggressive value (e.g. 1s)
-            // fires on packets that are merely queued in SCTP, snowballing
-            // into a duplicate storm that stalls the transfer.
+            chunk_size: 256 * 1024,
+            window_size: 64,
             timeout_ticks: 15_000,
         }
     }
@@ -155,15 +129,8 @@ pub struct ReceiveRequest {
     pub output_dir: PathBuf,
     pub announce_on_lan: bool,
     pub device_name: Option<String>,
-    /// When true, senders must prove knowledge of the pairing code (via an
-    /// `Auth` packet) before a transfer is accepted, and the beacon announces
-    /// `pin_required` instead of broadcasting the code itself.
     #[serde(default)]
     pub require_pin: bool,
-    /// When false, the engine emits `TransferEvent::IncomingRequest` on the
-    /// first `Start` packet and blocks until the app resolves it via
-    /// [`SessionControl::accept`]/[`SessionControl::decline`]. Defaults to
-    /// true (auto-accept) so existing CLI/desktop callers keep their behavior.
     #[serde(default = "default_true")]
     pub auto_accept: bool,
     pub permissions: CorePermissions,
@@ -181,9 +148,6 @@ pub struct DiscoverRequest {
     pub permissions: CorePermissions,
 }
 
-/// Sends a file over the internet via a relay/signaling server, negotiating a
-/// WebRTC data channel (see `crate::rtc`) instead of connecting directly over
-/// LAN. The sender acts as the WebRTC offerer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SendRemoteRequest {
     pub file_path: PathBuf,
@@ -196,9 +160,6 @@ pub struct SendRemoteRequest {
     pub options: TransferOptions,
 }
 
-/// Receives a file over the internet via a relay/signaling server, negotiating
-/// a WebRTC data channel (see `crate::rtc`) instead of listening on LAN. The
-/// receiver acts as the WebRTC answerer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReceiveRemoteRequest {
     pub output_dir: PathBuf,
@@ -214,17 +175,12 @@ pub struct ReceiveRemoteRequest {
     pub options: TransferOptions,
 }
 
-/// Generates a human-shareable room code used as the signaling `session_id`
-/// for internet transfers. Longer than the LAN pairing PIN since this code
-/// doubles as the actual session secret on a public relay server.
 pub fn generate_room_code() -> String {
     crate::discovery::PairingToken::generate_with_len(9)
         .code()
         .to_string()
 }
 
-/// Generates a random per-connection peer identifier for internet transfers.
-/// Never shown to the user; purely a wire-protocol identifier.
 pub fn generate_peer_id() -> String {
     crate::security::SessionId::generate().to_string()
 }
@@ -278,8 +234,6 @@ pub struct DiscoverySummary {
     pub hostname: String,
     pub address: String,
     pub token: String,
-    /// True when the peer's beacon indicates it will only accept transfers
-    /// carrying a valid pairing code — the send UI should prompt for one.
     #[serde(default)]
     pub pin_required: bool,
 }
@@ -306,34 +260,19 @@ pub enum TransferEvent {
         state: ConnectionState,
         peer: Option<String>,
     },
-    /// Receiver only: a sender wants to deliver this file and the request is
-    /// gated on user approval (`ReceiveRequest::auto_accept == false`). The
-    /// engine blocks until [`SessionControl::accept`]/[`decline`] resolves it
-    /// (or the approval window times out, which declines).
-    ///
-    /// [`decline`]: SessionControl::decline
     IncomingRequest {
         direction: TransferDirection,
         file_name: String,
         total_bytes: u64,
         peer: Option<String>,
     },
-    /// Sender only: `Start` metadata was delivered and the sender is waiting
-    /// for the receiver's `Accept` go-ahead (auto-accept answers immediately;
-    /// a manual receiver may take a while).
     AwaitingApproval {
         direction: TransferDirection,
         file_name: String,
     },
-    /// The session was cancelled locally via [`SessionControl::cancel`]. The
-    /// corresponding engine call returns `AppError::Cancelled` right after.
     Cancelled {
         direction: TransferDirection,
     },
-    /// The transfer was refused: by the local user (receiver declining an
-    /// incoming request) or by the peer (sender seeing the receiver's decline
-    /// / PIN rejection / cancellation). `reason` is a stable machine-readable
-    /// code: "declined", "pin_rejected", or "cancelled".
     Declined {
         direction: TransferDirection,
         reason: String,

@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions, create_dir_all};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -26,33 +26,23 @@ use crate::signaling::{RoutedSignal, SignalMessage, SignalingState};
 use crate::stream::{ResumeCheckpoint, chunk_bytes};
 use crate::transport::{MemoryTransport, MemoryTransportConfig, TcpTransport, Transport};
 
-/// How long the receiver holds an incoming `Start` open waiting for the local
-/// user to accept or decline it (when `auto_accept` is off) before declining.
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// How long the sender waits for the receiver's `Accept` after `Start`.
-/// Slightly longer than [`APPROVAL_TIMEOUT`] so the receiver's own timeout
-/// (which sends an explicit decline) wins the race and the sender gets a
-/// clear "declined" instead of a generic timeout.
 const ACCEPT_WAIT_TIMEOUT: Duration = Duration::from_secs(150);
 
-/// How long the receiver waits for the sender's `Auth` packet when a PIN is
-/// required, before dropping that connection and listening again.
 const AUTH_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Machine-readable reasons carried in a `Close` packet's payload.
 const CLOSE_REASON_DECLINED: &str = "declined";
 const CLOSE_REASON_PIN_REJECTED: &str = "pin_rejected";
 const CLOSE_REASON_CANCELLED: &str = "cancelled";
 
-/// Sender watchdog: abort if packets are awaiting acknowledgement but nothing
-/// has arrived from the receiver for this long. A healthy receiver ACKs every
-/// data packet, so prolonged silence means the connection is dead/half-open.
 const SEND_STALL_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Receiver watchdog: abort if no frames at all arrive for this long.
-/// Longer than the sender's timeout so the sender aborts first and the
-/// receiver's checkpoint stays valid for resume.
+const PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(100);
+
+const CHECKPOINT_SAVE_INTERVAL: Duration = Duration::from_secs(2);
+const CHECKPOINT_SAVE_BYTES: u64 = 4 * 1024 * 1024;
+
 const RECEIVE_STALL_TIMEOUT: Duration = Duration::from_secs(45);
 
 #[derive(Debug, Default)]
@@ -66,10 +56,6 @@ impl PlenumCore {
         Self::default()
     }
 
-    /// The control handle for this core's blocking calls. Clone it *before*
-    /// starting `send_file`/`receive_file`/... on a worker thread; the clone
-    /// can then cancel the session or answer an incoming-file request from
-    /// any other thread.
     pub fn control(&self) -> SessionControl {
         self.control.clone()
     }
@@ -117,7 +103,6 @@ impl PlenumCore {
         }));
         let tcp_transport = TcpTransport::connect(&address)?;
         
-        // Dummy control path for now, until relay transport is implemented
         let control_transport = MemoryTransport::new(MemoryTransportConfig::default());
         
         let mut transport = crate::transport::MultipathTransport::new(
@@ -145,8 +130,6 @@ impl PlenumCore {
         )
     }
 
-    /// Sends a file over the internet via a relay/signaling server, acting as
-    /// the WebRTC offerer. See `crate::rtc::RtcTransport::connect_as_offerer`.
     pub fn send_file_remote<S: EventSink>(
         &mut self,
         request: SendRemoteRequest,
@@ -197,7 +180,6 @@ impl PlenumCore {
             Some(request.session_id.clone()),
             started_at,
             &self.control,
-            // Internet transfers have no LAN PIN: the room code is the secret.
             None,
         )
     }
@@ -213,8 +195,6 @@ impl PlenumCore {
         control.reset_decision();
 
         let listener = TcpListener::bind(format!("0.0.0.0:{}", request.port))?;
-        // Non-blocking so the accept loop below can poll the cancel flag
-        // instead of parking inside `accept()` forever.
         listener.set_nonblocking(true)?;
         let actual_port = listener.local_addr()?.port();
 
@@ -255,8 +235,6 @@ impl PlenumCore {
             None
         };
 
-        // Ensure the broadcast thread is stopped on every exit path (cancel,
-        // auth failure, transfer error), not just the happy path.
         let result =
             self.accept_and_receive(&request, &listener, &token, &control, &stop_flag, sink);
 
@@ -268,8 +246,6 @@ impl PlenumCore {
         result
     }
 
-    /// Accept loop + auth gate + transfer for `receive_file`, split out so the
-    /// caller can stop the announce thread regardless of how this exits.
     fn accept_and_receive<S: EventSink>(
         &mut self,
         request: &ReceiveRequest,
@@ -279,9 +255,6 @@ impl PlenumCore {
         announce_stop: &AtomicBool,
         sink: &mut S,
     ) -> Result<crate::app::types::TransferSummary, AppError> {
-        // Outer loop: a sender that fails the PIN check is dropped and the
-        // listener keeps accepting, so one bad/mistyped attempt doesn't kill
-        // the whole receive session.
         loop {
             let started_at = Instant::now();
             let stream = loop {
@@ -304,8 +277,6 @@ impl PlenumCore {
                     Err(error) => return Err(error.into()),
                 }
             };
-            // The transfer stream itself uses blocking reads with a short
-            // read timeout (see TcpTransport), not the listener's mode.
             stream.set_nonblocking(false)?;
 
             let peer = stream
@@ -320,8 +291,6 @@ impl PlenumCore {
                 Box::new(control_transport),
             );
 
-            // PIN gate: require an Auth packet proving the pairing code
-            // before anything else happens on this connection.
             if request.require_pin {
                 match verify_sender_auth(&mut transport, token, control) {
                     Ok(()) => {}
@@ -354,7 +323,6 @@ impl PlenumCore {
                 peer: Some(peer.clone()),
             }));
 
-            // A sender is committed; stop announcing on the LAN.
             announce_stop.store(true, Ordering::Relaxed);
 
             return run_receive_transfer(
@@ -370,8 +338,6 @@ impl PlenumCore {
         }
     }
 
-    /// Receives a file over the internet via a relay/signaling server, acting
-    /// as the WebRTC answerer. See `crate::rtc::RtcTransport::connect_as_answerer`.
     pub fn receive_file_remote<S: EventSink>(
         &mut self,
         request: ReceiveRemoteRequest,
@@ -739,9 +705,6 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
-/// Runs the sender-side framing/window transfer loop over an already-connected
-/// transport (LAN TCP or internet WebRTC), given an open source file. Shared by
-/// `send_file` and `send_file_remote`.
 fn run_send_transfer<T: Transport, S: EventSink>(
     transport: &mut T,
     sink: &mut S,
@@ -756,9 +719,6 @@ fn run_send_transfer<T: Transport, S: EventSink>(
 ) -> Result<TransferSummary, AppError> {
     let file_name = file_name.to_string();
 
-    // Prove knowledge of the pairing code first: a receiver with
-    // "require PIN" enabled reads this before anything else and drops the
-    // connection if it is missing or wrong. Harmless when not required.
     if let Some(pin) = pin {
         transport.send(&encode_packet(&Packet::new(
             PacketType::Auth,
@@ -776,10 +736,6 @@ fn run_send_transfer<T: Transport, S: EventSink>(
         start_payload,
     ))?)?;
 
-    // The receiver replies with `Accept` once the transfer is approved
-    // (instantly under auto-accept; after a user decision otherwise). Any
-    // `Resume` arrives before the `Accept` on the ordered transport, so no
-    // separate resume-negotiation window is needed afterwards.
     sink.emit(PlenumEvent::Transfer(TransferEvent::AwaitingApproval {
         direction: TransferDirection::Send,
         file_name: file_name.clone(),
@@ -809,8 +765,9 @@ fn run_send_transfer<T: Transport, S: EventSink>(
     let mut buffer = vec![0u8; options.chunk_size];
     let mut bytes_acked = resume_bytes;
     let mut last_inbound = Instant::now();
+    let mut last_progress_emit = Instant::now() - PROGRESS_EMIT_INTERVAL;
+    let mut progress_dirty = false;
 
-    // TEMP DIAG: instrumentation to diagnose the internet-mode stall.
     let mut diag_acks_recv: u64 = 0;
     let mut diag_data_sent: u64 = 0;
     let mut diag_last = now_ms();
@@ -823,8 +780,6 @@ fn run_send_transfer<T: Transport, S: EventSink>(
     });
 
     loop {
-        // Cooperative cancel: tell the receiver why we're going away (its
-        // checkpoint stays on disk for a later resume), then bail out.
         if control.is_cancelled() {
             let _ = transport.send(&encode_packet(&Packet::new(
                 PacketType::Close,
@@ -852,11 +807,12 @@ fn run_send_transfer<T: Transport, S: EventSink>(
             sequence_no = sequence_no.saturating_add(1);
         }
 
+        let mut got_inbound = false;
         while let Some(frame) = transport.recv()? {
+            got_inbound = true;
             last_inbound = Instant::now();
             let ctrl_packet = parse_packet(&frame)?;
             match ctrl_packet.packet_type {
-                // The receiver bailed mid-transfer (cancel/decline).
                 PacketType::Close => {
                     let reason = String::from_utf8_lossy(&ctrl_packet.payload).into_owned();
                     sink.emit(PlenumEvent::Transfer(TransferEvent::Declined {
@@ -865,7 +821,6 @@ fn run_send_transfer<T: Transport, S: EventSink>(
                     }));
                     return Err(AppError::Rejected(rejection_message(&reason)));
                 }
-                // Late/duplicate handshake packets: not control traffic.
                 PacketType::Accept | PacketType::Resume | PacketType::Auth => continue,
                 _ => {}
             }
@@ -873,21 +828,29 @@ fn run_send_transfer<T: Transport, S: EventSink>(
                 diag_acks_recv = diag_acks_recv.saturating_add(1);
                 if let Some(size) = ack_sizes.remove(&ctrl_packet.sequence_no) {
                     bytes_acked = bytes_acked.saturating_add(size as u64);
-                    sink.emit(PlenumEvent::Transfer(TransferEvent::Progress {
-                        direction: TransferDirection::Send,
-                        transferred_bytes: bytes_acked.min(file_size),
-                        total_bytes: file_size,
-                    }));
+                    progress_dirty = true;
                 }
             }
             sender.handle_control_packet(&ctrl_packet)?;
         }
 
-        sender.retransmit_due(transport, now)?;
-        diag_data_sent = diag_data_sent.saturating_add(sender.send_available(transport, now)? as u64);
+        if progress_dirty
+            && (last_progress_emit.elapsed() >= PROGRESS_EMIT_INTERVAL
+                || bytes_acked >= file_size)
+        {
+            progress_dirty = false;
+            last_progress_emit = Instant::now();
+            sink.emit(PlenumEvent::Transfer(TransferEvent::Progress {
+                direction: TransferDirection::Send,
+                transferred_bytes: bytes_acked.min(file_size),
+                total_bytes: file_size,
+            }));
+        }
 
-        // TEMP DIAG: heartbeat every ~1s so we can see whether data leaves and
-        // whether ACKs ever come back.
+        sender.retransmit_due(transport, now)?;
+        let just_sent = sender.send_available(transport, now)?;
+        diag_data_sent = diag_data_sent.saturating_add(just_sent as u64);
+
         if now.saturating_sub(diag_last) >= 1000 {
             diag_last = now;
             sink.emit(PlenumEvent::Log {
@@ -911,9 +874,6 @@ fn run_send_transfer<T: Transport, S: EventSink>(
             break;
         }
 
-        // Watchdog: packets are awaiting ACKs but the receiver has gone
-        // silent — the connection is dead or half-open. Abort instead of
-        // spinning forever; the receiver's checkpoint allows a later resume.
         if !sender.is_empty() && last_inbound.elapsed() >= SEND_STALL_TIMEOUT {
             return Err(AppError::Stalled(format!(
                 "no packets from receiver for {}s ({} in flight, {} pending)",
@@ -923,7 +883,17 @@ fn run_send_transfer<T: Transport, S: EventSink>(
             )));
         }
 
-        thread::sleep(Duration::from_millis(1));
+        if just_sent == 0 && !got_inbound && sender.in_flight_len() >= options.window_size {
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    if progress_dirty {
+        sink.emit(PlenumEvent::Transfer(TransferEvent::Progress {
+            direction: TransferDirection::Send,
+            transferred_bytes: bytes_acked.min(file_size),
+            total_bytes: file_size,
+        }));
     }
 
     sink.emit(PlenumEvent::Log {
@@ -960,9 +930,6 @@ fn run_send_transfer<T: Transport, S: EventSink>(
     Ok(summary)
 }
 
-/// Runs the receiver-side framing/window transfer loop over an already-connected
-/// transport (LAN TCP or internet WebRTC), writing into `output_dir`. Shared by
-/// `receive_file` and `receive_file_remote`.
 fn run_receive_transfer<T: Transport, S: EventSink>(
     transport: &mut T,
     sink: &mut S,
@@ -974,15 +941,18 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
     auto_accept: bool,
 ) -> Result<TransferSummary, AppError> {
     let mut receiver = ReceiverWindow::new();
-    let mut file: Option<File> = None;
+    let mut file: Option<BufWriter<File>> = None;
     let mut file_name = String::from("received_file");
     let mut file_size = 0u64;
     let mut bytes_received = 0u64;
     let mut checkpoint: Option<ResumeCheckpoint> = None;
     let mut checkpoint_path: Option<PathBuf> = None;
     let mut peak_receiver_buffered = 0usize;
+    let mut last_progress_emit = Instant::now() - PROGRESS_EMIT_INTERVAL;
+    let mut last_checkpoint_save = Instant::now() - CHECKPOINT_SAVE_INTERVAL;
+    let mut bytes_since_checkpoint = 0u64;
+    let mut progress_dirty = false;
 
-    // TEMP DIAG: instrumentation to diagnose the internet-mode stall.
     let mut diag_data_recv: u64 = 0;
     let mut diag_acks_sent: u64 = 0;
     let mut diag_frames: u64 = 0;
@@ -994,9 +964,16 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
     });
 
     loop {
-        // Cooperative cancel: tell the sender why we're going away (our
-        // checkpoint stays on disk for a later resume), then bail out.
         if control.is_cancelled() {
+            if let Some(cp) = checkpoint.as_mut() {
+                cp.update(receiver.next_expected(), bytes_received);
+                if let Some(path) = checkpoint_path.as_ref() {
+                    let _ = cp.save(path);
+                }
+            }
+            if let Some(file) = file.as_mut() {
+                let _ = file.flush();
+            }
             if let Ok(bytes) = encode_packet(&Packet::new(
                 PacketType::Close,
                 receiver.next_expected(),
@@ -1011,8 +988,6 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
             return Err(AppError::Cancelled);
         }
 
-        // TEMP DIAG: heartbeat every ~1s, even while idle, so we can see whether
-        // ANY packet ever reaches the receiver.
         let diag_now = now_ms();
         if diag_now.saturating_sub(diag_last) >= 1000 {
             diag_last = diag_now;
@@ -1038,10 +1013,16 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
                 frame
             }
             Ok(None) => {
-                // Watchdog: nothing at all from the sender for too long —
-                // connection is dead or half-open. Abort; the checkpoint on
-                // disk allows a later resume.
                 if last_frame_at.elapsed() >= RECEIVE_STALL_TIMEOUT {
+                    if let Some(cp) = checkpoint.as_mut() {
+                        cp.update(receiver.next_expected(), bytes_received);
+                        if let Some(path) = checkpoint_path.as_ref() {
+                            let _ = cp.save(path);
+                        }
+                    }
+                    if let Some(file) = file.as_mut() {
+                        let _ = file.flush();
+                    }
                     return Err(AppError::Stalled(format!(
                         "no packets from sender for {}s",
                         RECEIVE_STALL_TIMEOUT.as_secs()
@@ -1087,14 +1068,15 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
                     options.chunk_size,
                 )?;
 
-                file = Some(open_file);
+                file = Some(BufWriter::with_capacity(1024 * 1024, open_file));
                 checkpoint = Some(cp);
                 checkpoint_path = Some(cp_path.clone());
                 receiver = ReceiverWindow::with_next_expected(resume_sequence);
                 bytes_received = resume_bytes;
+                bytes_since_checkpoint = 0;
+                last_checkpoint_save = Instant::now();
                 file_name = clean_name;
 
-                // TEMP DIAG
                 sink.emit(PlenumEvent::Log {
                     level: LogLevel::Info,
                     message: format!(
@@ -1102,9 +1084,6 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
                     ),
                 });
 
-                // Accept gate: surface the offer to the UI and wait for a
-                // decision before any data flows. Auto-accept (the default,
-                // and the only behaviour desktop/CLI expose) skips the wait.
                 sink.emit(PlenumEvent::Transfer(TransferEvent::IncomingRequest {
                     direction: TransferDirection::Receive,
                     file_name: file_name.clone(),
@@ -1180,9 +1159,7 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
                     ))?)?;
                 }
 
-                // Go-ahead: the sender blocks in `wait_for_accept` until this
-                // arrives. It is sent after any `Resume` so the ordered
-                // transport delivers the resume offset first.
+               
                 transport.send(&encode_packet(&Packet::new(
                     PacketType::Accept,
                     resume_sequence,
@@ -1196,8 +1173,7 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
                     resumed_bytes: resume_bytes,
                 }));
 
-                // A human decision may have taken minutes; don't let the
-                // stall watchdog count that time against the sender.
+              
                 last_frame_at = Instant::now();
             }
             PacketType::Data => {
@@ -1214,41 +1190,71 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
                     peak_receiver_buffered.max(receiver.buffered_payload_bytes());
                 let drained = receiver.drain_ordered_packets();
                 if !drained.is_empty() {
+                    let mut batch_bytes = 0u64;
                     for (_, payload) in drained {
-                        bytes_received = bytes_received.saturating_add(payload.len() as u64);
+                        batch_bytes = batch_bytes.saturating_add(payload.len() as u64);
                         if let Some(file) = file.as_mut() {
                             file.write_all(&payload)?;
                         }
                     }
+                    bytes_received = bytes_received.saturating_add(batch_bytes);
+                    bytes_since_checkpoint =
+                        bytes_since_checkpoint.saturating_add(batch_bytes);
+                    progress_dirty = true;
 
                     if let Some(cp) = checkpoint.as_mut() {
                         cp.update(receiver.next_expected(), bytes_received);
-                        if let Some(path) = checkpoint_path.as_ref() {
-                            cp.save(path)?;
-                            sink.emit(PlenumEvent::Transfer(TransferEvent::CheckpointUpdated {
-                                checkpoint_path: path.clone(),
-                                next_sequence: cp.next_sequence,
-                                bytes_written: cp.bytes_written,
-                            }));
+                        let due = bytes_since_checkpoint >= CHECKPOINT_SAVE_BYTES
+                            || last_checkpoint_save.elapsed() >= CHECKPOINT_SAVE_INTERVAL;
+                        if due {
+                            if let Some(file) = file.as_mut() {
+                                file.flush()?;
+                            }
+                            if let Some(path) = checkpoint_path.as_ref() {
+                                cp.save(path)?;
+                                sink.emit(PlenumEvent::Transfer(
+                                    TransferEvent::CheckpointUpdated {
+                                        checkpoint_path: path.clone(),
+                                        next_sequence: cp.next_sequence,
+                                        bytes_written: cp.bytes_written,
+                                    },
+                                ));
+                            }
+                            bytes_since_checkpoint = 0;
+                            last_checkpoint_save = Instant::now();
                         }
                     }
 
+                    if last_progress_emit.elapsed() >= PROGRESS_EMIT_INTERVAL
+                        || bytes_received >= file_size
+                    {
+                        progress_dirty = false;
+                        last_progress_emit = Instant::now();
+                        sink.emit(PlenumEvent::Transfer(TransferEvent::Progress {
+                            direction: TransferDirection::Receive,
+                            transferred_bytes: bytes_received.min(file_size),
+                            total_bytes: file_size,
+                        }));
+                    }
+                }
+            }
+            PacketType::Finish => {
+                if let Some(file) = file.as_mut() {
+                    file.flush()?;
+                }
+                if progress_dirty {
                     sink.emit(PlenumEvent::Transfer(TransferEvent::Progress {
                         direction: TransferDirection::Receive,
                         transferred_bytes: bytes_received.min(file_size),
                         total_bytes: file_size,
                     }));
                 }
-            }
-            PacketType::Finish => {
                 if let Some(path) = checkpoint_path.as_ref() {
                     ResumeCheckpoint::clear(path)?;
                 }
                 break;
             }
             PacketType::Close => {
-                // The sender bailed mid-transfer (cancel or error). Keep the
-                // checkpoint on disk so a later attempt can resume.
                 let reason = String::from_utf8_lossy(&packet.payload).into_owned();
                 if reason.is_empty() {
                     break;
@@ -1264,7 +1270,6 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
         }
     }
 
-    // TEMP DIAG
     sink.emit(PlenumEvent::Log {
         level: LogLevel::Info,
         message: format!(
@@ -1272,8 +1277,6 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
         ),
     });
 
-    // Tolerant close: the sender may have already disconnected, so
-    // closing an already-severed connection is expected and not fatal.
     let _ = transport.close();
     let summary = TransferSummary {
         direction: TransferDirection::Receive,
@@ -1325,9 +1328,6 @@ fn verify_sender_auth<T: Transport>(
         }
         match transport.recv() {
             Ok(Some(frame)) => {
-                // Anything unparsable or anything other than `Auth` first
-                // (e.g. a `Start` from a sender that never prompted for the
-                // code) counts as a failed proof.
                 let Ok(packet) = parse_packet(&frame) else {
                     return Err(AuthGateOutcome::WrongPin);
                 };
@@ -1352,10 +1352,6 @@ fn verify_sender_auth<T: Transport>(
     }
 }
 
-/// Sender side of the accept gate: blocks after `Start` until the receiver's
-/// `Accept` arrives. Any `Resume` is guaranteed by the ordered transport to
-/// arrive first, so this also returns the negotiated resume position as
-/// `(next_sequence, resumed_bytes)`.
 fn wait_for_accept<T: Transport, S: EventSink>(
     transport: &mut T,
     control: &SessionControl,

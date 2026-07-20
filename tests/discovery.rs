@@ -42,6 +42,7 @@ fn announcement_roundtrip_encode_decode() {
         tcp_port: 9090,
         hostname: "test-machine".to_string(),
         source_addr: Ipv4Addr::LOCALHOST,
+        pin_required: false,
     };
 
     let encoded = original.encode();
@@ -84,7 +85,7 @@ fn beacon_broadcast_and_discover_on_localhost() {
     // Broadcaster in a background thread
     let broadcast_beacon = Beacon::with_config(config.clone());
     let handle = broadcast_beacon
-        .broadcast(&token, tcp_port)
+        .broadcast(&token, tcp_port, None, false)
         .expect("broadcast should start");
 
     let broadcaster = std::thread::spawn(move || {
