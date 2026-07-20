@@ -48,7 +48,9 @@ pub fn run() {
             commands::receive_file_remote_command,
             commands::generate_room_code_command,
             commands::generate_peer_id_command,
-            commands::fetch_turn_credentials_command
+            commands::fetch_turn_credentials_command,
+            commands::respond_to_incoming_command,
+            commands::cancel_session_command
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

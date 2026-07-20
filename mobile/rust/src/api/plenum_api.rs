@@ -89,11 +89,13 @@ pub fn start_send(
     file_path: String,
     peer_address: String,
     optional_pin: Option<String>,
+    device_name: Option<String>,
 ) -> anyhow::Result<String> {
     let req = SendRequest {
         file_path: PathBuf::from(file_path),
         address: Some(peer_address),
         discovery_token: optional_pin,
+        device_name,
         permissions: CorePermissions::mobile_defaults(),
         options: TransferOptions::default(),
     };
@@ -168,6 +170,7 @@ pub fn start_send_remote(
     my_peer_id: String,
     ice_servers_json: String,
     connect_timeout_secs: u64,
+    device_name: Option<String>,
 ) -> anyhow::Result<String> {
     let ice_servers = serde_json::from_str(&ice_servers_json)
         .map_err(|e| anyhow::anyhow!("Invalid ice_servers_json: {}", e))?;
@@ -179,6 +182,7 @@ pub fn start_send_remote(
         my_peer_id,
         ice_servers,
         connect_timeout_secs,
+        device_name,
         permissions: CorePermissions::mobile_defaults(),
         options: TransferOptions::default(),
     };
@@ -213,6 +217,7 @@ pub fn start_receive_remote(
     ice_servers_json: String,
     connect_timeout_secs: u64,
     auto_accept: bool,
+    device_name: Option<String>,
 ) -> anyhow::Result<String> {
     let ice_servers = serde_json::from_str(&ice_servers_json)
         .map_err(|e| anyhow::anyhow!("Invalid ice_servers_json: {}", e))?;
@@ -225,6 +230,7 @@ pub fn start_receive_remote(
         ice_servers,
         connect_timeout_secs,
         auto_accept,
+        device_name,
         permissions: CorePermissions::mobile_defaults(),
         options: TransferOptions::default(),
     };
