@@ -3,6 +3,7 @@
 //! offer/answer/ICE-candidate negotiation up to an open data channel.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
@@ -12,6 +13,7 @@ use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
 use webrtc::api::setting_engine::SettingEngine;
 use webrtc::api::APIBuilder;
+use webrtc::ice::candidate::CandidateType;
 use webrtc::ice::network_type::NetworkType;
 use webrtc::data_channel::data_channel_init::RTCDataChannelInit;
 use webrtc::data_channel::data_channel_state::RTCDataChannelState;
@@ -49,6 +51,10 @@ pub struct ConnectedChannel {
     pub inbound_rx: std::sync::mpsc::Receiver<Vec<u8>>,
     pub diag_tx: std::sync::mpsc::Sender<String>,
     pub diag_rx: std::sync::mpsc::Receiver<String>,
+    /// True while the nominated ICE candidate pair goes through a TURN relay.
+    /// Updated by the stats poller (ICE can re-nominate mid-transfer), read by
+    /// `RtcTransport::is_relayed`.
+    pub relayed: Arc<AtomicBool>,
 }
 
 fn build_api() -> Result<webrtc::api::API, RtcError> {
@@ -132,12 +138,6 @@ async fn send_ws_message(
         .map_err(|error| RtcError::WebSocket(error.to_string()))
 }
 
-/// Spawn the outbound WS drain task: forwards locally-generated
-/// `SignalMessage`s (ICE candidates; offer/answer are queued the same way) to
-/// the relay as JSON text frames. Also listens on `ws_close_rx` so the socket
-/// can be shut down with a proper close handshake once signaling is finished —
-/// the receiver also resolves if the sender is dropped on an error path, so
-/// the socket is closed cleanly in every case.
 fn spawn_outbound_task(
     mut ws_tx: futures_util::stream::SplitSink<
         tokio_tungstenite::WebSocketStream<
@@ -170,11 +170,6 @@ fn spawn_outbound_task(
     });
 }
 
-/// Keep the signaling socket alive for a grace period after the local data
-/// channel opens: keep reading inbound frames and applying late remote trickle
-/// ICE candidates (outbound candidates keep flowing through the outbound task
-/// the whole time), then signal the outbound task to close the socket with a
-/// proper close handshake. See `SIGNALING_LINGER` for why this matters.
 fn spawn_signaling_linger(
     mut ws_rx: futures_util::stream::SplitStream<
         tokio_tungstenite::WebSocketStream<
@@ -231,10 +226,6 @@ fn spawn_signaling_linger(
     });
 }
 
-/// Register the outbound ICE-candidate drain: whenever the peer connection
-/// gathers a local candidate, ship it over `outbound_tx` addressed to
-/// `remote_peer_id_slot` (filled in once the remote peer id is known). `None`
-/// signals end-of-candidates and is not forwarded (nothing to send).
 fn wire_ice_candidate_outbound(
     peer_connection: &Arc<RTCPeerConnection>,
     outbound_tx: mpsc::UnboundedSender<SignalMessage>,
@@ -252,10 +243,6 @@ fn wire_ice_candidate_outbound(
                 return;
             };
             let Some(to_peer_id) = remote_peer_id.lock().unwrap().clone() else {
-                // Remote peer id not known yet; drop the candidate. In practice
-                // candidates only start gathering after set_local_description,
-                // which (for both roles here) happens after the remote peer id
-                // is already known.
                 return;
             };
             let Ok(init) = candidate.to_json() else {
@@ -274,10 +261,6 @@ fn wire_ice_candidate_outbound(
     }));
 }
 
-/// TEMP DIAG: log ICE and peer-connection state transitions through `diag_tx`
-/// (drained by `RtcTransport::poll_diagnostics` and forwarded to the app's
-/// event sink) so they're visible on-device via `adb logcat`, not just
-/// desktop stderr.
 fn wire_state_logging(
     peer_connection: &Arc<RTCPeerConnection>,
     role: &'static str,
@@ -296,17 +279,11 @@ fn wire_state_logging(
     ));
 }
 
-/// TEMP DIAG: periodically poll `get_stats()` for the *nominated* (i.e.
-/// actually selected, not just offered) ICE candidate pair, resolve its
-/// local/remote candidate types (host/srflx/relay) and addresses, and report
-/// byte counters + RTT. This is the only way to know whether a transfer is
-/// genuinely peer-to-peer or relayed, and whether bytes are moving at the
-/// network layer at all -- signaling logs only show candidates that were
-/// *offered*, never which pair actually won.
 fn spawn_stats_poller(
     peer_connection: Arc<RTCPeerConnection>,
     diag_tx: std::sync::mpsc::Sender<String>,
     role: &'static str,
+    relayed: Arc<AtomicBool>,
 ) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(2));
@@ -322,6 +299,18 @@ fn spawn_stats_poller(
             let Some(pair) = nominated else {
                 let _ = diag_tx.send(format!("DIAG {role}: stats -> no nominated candidate pair yet"));
                 continue;
+            };
+
+            let candidate_type = |id: &str| -> Option<CandidateType> {
+                report.reports.values().find_map(|entry| match entry {
+                    StatsReportType::LocalCandidate(candidate) if candidate.id == id => {
+                        Some(candidate.candidate_type)
+                    }
+                    StatsReportType::RemoteCandidate(candidate) if candidate.id == id => {
+                        Some(candidate.candidate_type)
+                    }
+                    _ => None,
+                })
             };
 
             let describe_candidate = |id: &str| -> String {
@@ -340,6 +329,11 @@ fn spawn_stats_poller(
                     .unwrap_or_else(|| "unknown".to_string())
             };
 
+            let is_relayed = candidate_type(&pair.local_candidate_id)
+                == Some(CandidateType::Relay)
+                || candidate_type(&pair.remote_candidate_id) == Some(CandidateType::Relay);
+            relayed.store(is_relayed, Ordering::Relaxed);
+
             let local = describe_candidate(&pair.local_candidate_id);
             let remote = describe_candidate(&pair.remote_candidate_id);
 
@@ -356,10 +350,6 @@ fn spawn_stats_poller(
     });
 }
 
-/// Connect to the relay as the **offerer** (sender role): join the session, wait
-/// for `PeerJoined` (either a genuine new peer or the relay's synthesized
-/// already-present-peer notification) to learn the answerer's peer id, create the
-/// data channel + offer, negotiate, and wait for the data channel to open.
 pub async fn run_offerer(
     relay_url: &str,
     session_id: &str,
@@ -403,19 +393,11 @@ pub async fn run_offerer(
     );
     wire_state_logging(&peer_connection, "offerer", diag_tx.clone());
 
-    // Spawn the outbound WS drain task: forwards locally-generated SignalMessages
-    // (currently just ICE candidates; offer/answer are sent inline below) to the
-    // relay as JSON text frames.
     let (ws_close_tx, ws_close_rx) = oneshot::channel::<()>();
     spawn_outbound_task(ws_tx, outbound_rx, ws_close_rx);
 
     let mut data_channel_created = false;
     let mut pending_data_channel: Option<Arc<RTCDataChannel>> = None;
-    // Remote ICE candidates can arrive before the answer sets our remote
-    // description (candidates gather the moment we set_local_description, so the
-    // peer may trickle some before its Answer reaches us). webrtc-rs rejects
-    // add_ice_candidate with ErrNoRemoteDescription in that window, so buffer
-    // early candidates and flush them once the remote description is set.
     let mut remote_description_set = false;
     let mut pending_remote_candidates: Vec<RTCIceCandidateInit> = Vec::new();
 
@@ -522,7 +504,13 @@ pub async fn run_offerer(
     let data_channel = pending_data_channel
         .ok_or_else(|| RtcError::PeerConnection("data channel was never created".into()))?;
 
-    spawn_stats_poller(Arc::clone(&peer_connection), diag_tx.clone(), "offerer");
+    let relayed = Arc::new(AtomicBool::new(false));
+    spawn_stats_poller(
+        Arc::clone(&peer_connection),
+        diag_tx.clone(),
+        "offerer",
+        Arc::clone(&relayed),
+    );
 
     Ok(ConnectedChannel {
         peer_connection,
@@ -530,13 +518,10 @@ pub async fn run_offerer(
         inbound_rx,
         diag_tx,
         diag_rx,
+        relayed,
     })
 }
 
-/// Connect to the relay as the **answerer** (receiver role): join the session,
-/// register `on_data_channel` before any remote description is set (so it fires
-/// reliably when the offerer's channel arrives), wait for an `Offer`, answer it,
-/// and wait for the resulting data channel to open.
 pub async fn run_answerer(
     relay_url: &str,
     session_id: &str,
@@ -558,13 +543,6 @@ pub async fn run_answerer(
     .await?;
 
     let api = build_api()?;
-    // Default configuration for now; if the incoming Offer carries a `nat` payload
-    // with ICE servers, we rebuild the peer connection's effective config isn't
-    // possible post-construction for ice_servers, so we honor the caller-supplied
-    // `ice_servers` here and layer in offer-provided ones (if any) at that point is
-    // not supported by webrtc-rs (ice_servers is fixed at construction). We
-    // therefore construct using the caller-supplied ice_servers; the offer's `nat`
-    // is used only if the peer connection has not yet been created (see below).
     let configuration: RTCConfiguration = to_rtc_configuration(&ice_servers);
     let peer_connection = Arc::new(
         api.new_peer_connection(configuration)
@@ -587,8 +565,6 @@ pub async fn run_answerer(
     );
     wire_state_logging(&peer_connection, "answerer", diag_tx.clone());
 
-    // Register on_data_channel BEFORE set_remote_description, so it reliably
-    // fires when the offerer's channel arrives during negotiation.
     let inbound_tx_for_channel = inbound_tx.clone();
     let open_tx_for_channel = open_tx.clone();
     let pending_data_channel: Arc<std::sync::Mutex<Option<Arc<RTCDataChannel>>>> =
@@ -596,10 +572,6 @@ pub async fn run_answerer(
     let pending_data_channel_setter = Arc::clone(&pending_data_channel);
     peer_connection.on_data_channel(Box::new(move |data_channel: Arc<RTCDataChannel>| {
         wire_data_channel(&data_channel, inbound_tx_for_channel.clone(), open_tx_for_channel.clone());
-        // Race: the channel may already be Open by the time we register
-        // `on_open` (it fired before registration and will never fire again).
-        // Check the state directly and signal readiness ourselves — otherwise
-        // the answerer waits forever while the offerer happily transmits.
         if data_channel.ready_state() == RTCDataChannelState::Open {
             let _ = open_tx_for_channel.send(());
         }
@@ -611,13 +583,8 @@ pub async fn run_answerer(
     spawn_outbound_task(ws_tx, outbound_rx, ws_close_rx);
 
     let mut answered = false;
-    // See the offerer's comment: buffer remote ICE candidates that arrive before
-    // we've set the remote description (the offer), then flush once it's set.
     let mut remote_description_set = false;
     let mut pending_remote_candidates: Vec<RTCIceCandidateInit> = Vec::new();
-    // Fallback for the on_open registration race (see on_data_channel above):
-    // poll the pending channel's state so a missed open callback can never
-    // wedge the answerer.
     let mut open_poll = tokio::time::interval(Duration::from_millis(200));
 
     loop {
@@ -721,7 +688,13 @@ pub async fn run_answerer(
         .clone()
         .ok_or_else(|| RtcError::PeerConnection("data channel was never received".into()))?;
 
-    spawn_stats_poller(Arc::clone(&peer_connection), diag_tx.clone(), "answerer");
+    let relayed = Arc::new(AtomicBool::new(false));
+    spawn_stats_poller(
+        Arc::clone(&peer_connection),
+        diag_tx.clone(),
+        "answerer",
+        Arc::clone(&relayed),
+    );
 
     Ok(ConnectedChannel {
         peer_connection,
@@ -729,5 +702,6 @@ pub async fn run_answerer(
         inbound_rx,
         diag_tx,
         diag_rx,
+        relayed,
     })
 }

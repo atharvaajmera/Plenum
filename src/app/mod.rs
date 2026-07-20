@@ -15,5 +15,5 @@ pub use types::{
     AcceptDecision, BenchmarkEvent, BenchmarkIterationSummary, BenchmarkRequest, BenchmarkSummary,
     ConnectionState, CorePermissions, DiscoverRequest, DiscoveryEvent, DiscoverySummary, EventSink,
     LogLevel, PermissionKind, PlenumEvent, ReceiveRequest, SendRequest, SessionControl,
-    TransferDirection, TransferEvent, TransferOptions, TransferSummary,
+    TransferDirection, TransferEvent, TransferMode, TransferOptions, TransferSummary,
 };

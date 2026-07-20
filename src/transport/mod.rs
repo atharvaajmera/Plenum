@@ -26,4 +26,8 @@ pub trait Transport {
     fn poll_diagnostics(&mut self) -> Vec<String> {
         Vec::new()
     }
+
+    fn is_relayed(&self) -> Option<bool> {
+        None
+    }
 }

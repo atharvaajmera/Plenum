@@ -13,7 +13,7 @@ pub enum AcceptDecision {
     Declined,
 }
 
-
+#[derive(Debug, Clone, Default)]
 pub struct SessionControl {
     cancelled: Arc<AtomicBool>,
     decision: Arc<AtomicU8>,
@@ -119,6 +119,8 @@ pub struct SendRequest {
     pub file_path: PathBuf,
     pub address: Option<String>,
     pub discovery_token: Option<String>,
+    #[serde(default)]
+    pub device_name: Option<String>,
     pub permissions: CorePermissions,
     pub options: TransferOptions,
 }
@@ -156,6 +158,9 @@ pub struct SendRemoteRequest {
     pub my_peer_id: String,
     pub ice_servers: Vec<crate::signaling::IceServer>,
     pub connect_timeout_secs: u64,
+    /// See [`SendRequest::device_name`].
+    #[serde(default)]
+    pub device_name: Option<String>,
     pub permissions: CorePermissions,
     pub options: TransferOptions,
 }
@@ -171,6 +176,8 @@ pub struct ReceiveRemoteRequest {
     /// See [`ReceiveRequest::auto_accept`].
     #[serde(default = "default_true")]
     pub auto_accept: bool,
+    #[serde(default)]
+    pub device_name: Option<String>,
     pub permissions: CorePermissions,
     pub options: TransferOptions,
 }
@@ -199,6 +206,14 @@ pub enum TransferDirection {
     Receive,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TransferMode {
+    #[default]
+    Lan,
+    Direct,
+    Relay,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConnectionState {
     Discovering,
@@ -223,6 +238,10 @@ pub struct TransferSummary {
     pub direction: TransferDirection,
     pub file_name: String,
     pub peer: Option<String>,
+    #[serde(default)]
+    pub peer_name: Option<String>,
+    #[serde(default)]
+    pub mode: TransferMode,
     pub total_bytes: u64,
     pub transferred_bytes: u64,
     pub resumed_bytes: u64,
@@ -265,6 +284,11 @@ pub enum TransferEvent {
         file_name: String,
         total_bytes: u64,
         peer: Option<String>,
+        sender_name: Option<String>,
+    },
+    ConnectionEstablished {
+        direction: TransferDirection,
+        mode: TransferMode,
     },
     AwaitingApproval {
         direction: TransferDirection,

@@ -172,6 +172,14 @@ impl Transport for MultipathTransport {
         self.closed
     }
 
+    fn is_relayed(&self) -> Option<bool> {
+        if self.local_active {
+            self.local_path.is_relayed()
+        } else {
+            self.control_path.is_relayed()
+        }
+    }
+
     fn poll_diagnostics(&mut self) -> Vec<String> {
         let mut diagnostics: Vec<String> = self
             .local_path

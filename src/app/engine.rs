@@ -15,7 +15,7 @@ use crate::app::types::{
     AcceptDecision, PlenumEvent, BenchmarkEvent, BenchmarkIterationSummary, BenchmarkRequest,
     BenchmarkSummary, ConnectionState, CorePermissions, DiscoverRequest, DiscoveryEvent,
     DiscoverySummary, EventSink, LogLevel, PermissionKind, ReceiveRemoteRequest, ReceiveRequest,
-    SendRemoteRequest, SendRequest, SessionControl, TransferDirection, TransferEvent,
+    SendRemoteRequest, SendRequest, SessionControl, TransferDirection, TransferEvent, TransferMode,
     TransferSummary,
 };
 use crate::discovery::{Beacon, PairingToken};
@@ -127,6 +127,7 @@ impl PlenumCore {
             started_at,
             &self.control,
             request.discovery_token.as_deref(),
+            request.device_name.as_deref(),
         )
     }
 
@@ -181,6 +182,7 @@ impl PlenumCore {
             started_at,
             &self.control,
             None,
+            request.device_name.as_deref(),
         )
     }
 
@@ -334,6 +336,7 @@ impl PlenumCore {
                 started_at,
                 control,
                 request.auto_accept,
+                request.device_name.as_deref(),
             );
         }
     }
@@ -382,6 +385,7 @@ impl PlenumCore {
             started_at,
             &control,
             request.auto_accept,
+            request.device_name.as_deref(),
         )
     }
 
@@ -705,6 +709,82 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+const START_PAYLOAD_V2_SENTINEL: u8 = 0xFF;
+fn encode_start_payload(file_size: u64, file_name: &str, device_name: Option<&str>) -> Vec<u8> {
+    let name_bytes = file_name.as_bytes();
+    match device_name {
+        None => {
+            let mut payload = Vec::with_capacity(8 + name_bytes.len());
+            payload.extend_from_slice(&file_size.to_be_bytes());
+            payload.extend_from_slice(name_bytes);
+            payload
+        }
+        Some(device_name) => {
+            let mut payload = Vec::with_capacity(11 + name_bytes.len() + device_name.len());
+            payload.push(START_PAYLOAD_V2_SENTINEL);
+            payload.extend_from_slice(&file_size.to_be_bytes());
+            payload.extend_from_slice(&(name_bytes.len() as u16).to_be_bytes());
+            payload.extend_from_slice(name_bytes);
+            payload.extend_from_slice(device_name.as_bytes());
+            payload
+        }
+    }
+}
+
+fn parse_start_payload(payload: &[u8]) -> Result<(u64, String, Option<String>), AppError> {
+    if payload.first() == Some(&START_PAYLOAD_V2_SENTINEL) {
+        if payload.len() < 11 {
+            return Err(AppError::InvalidRequest(
+                "versioned start packet payload is too short".into(),
+            ));
+        }
+        let mut size_bytes = [0u8; 8];
+        size_bytes.copy_from_slice(&payload[1..9]);
+        let file_size = u64::from_be_bytes(size_bytes);
+        let name_len = u16::from_be_bytes([payload[9], payload[10]]) as usize;
+        if payload.len() < 11 + name_len {
+            return Err(AppError::InvalidRequest(
+                "start packet file name is truncated".into(),
+            ));
+        }
+        let file_name = String::from_utf8_lossy(&payload[11..11 + name_len]).into_owned();
+        let device_bytes = &payload[11 + name_len..];
+        let sender_name = if device_bytes.is_empty() {
+            None
+        } else {
+            Some(String::from_utf8_lossy(device_bytes).into_owned())
+        };
+        Ok((file_size, file_name, sender_name))
+    } else {
+        if payload.len() < 8 {
+            return Err(AppError::InvalidRequest(
+                "start packet payload must contain file size".into(),
+            ));
+        }
+        let mut size_bytes = [0u8; 8];
+        size_bytes.copy_from_slice(&payload[0..8]);
+        let file_size = u64::from_be_bytes(size_bytes);
+        let file_name = String::from_utf8_lossy(&payload[8..]).into_owned();
+        Ok((file_size, file_name, None))
+    }
+}
+
+fn parse_accept_payload(payload: &[u8]) -> Option<String> {
+    if payload.is_empty() {
+        None
+    } else {
+        Some(String::from_utf8_lossy(payload).into_owned())
+    }
+}
+
+fn transfer_mode<T: Transport + ?Sized>(transport: &T) -> TransferMode {
+    match transport.is_relayed() {
+        None => TransferMode::Lan,
+        Some(false) => TransferMode::Direct,
+        Some(true) => TransferMode::Relay,
+    }
+}
+
 fn run_send_transfer<T: Transport, S: EventSink>(
     transport: &mut T,
     sink: &mut S,
@@ -716,8 +796,14 @@ fn run_send_transfer<T: Transport, S: EventSink>(
     started_at: Instant,
     control: &SessionControl,
     pin: Option<&str>,
+    device_name: Option<&str>,
 ) -> Result<TransferSummary, AppError> {
     let file_name = file_name.to_string();
+
+    sink.emit(PlenumEvent::Transfer(TransferEvent::ConnectionEstablished {
+        direction: TransferDirection::Send,
+        mode: transfer_mode(transport),
+    }));
 
     if let Some(pin) = pin {
         transport.send(&encode_packet(&Packet::new(
@@ -727,20 +813,17 @@ fn run_send_transfer<T: Transport, S: EventSink>(
         ))?)?;
     }
 
-    let mut start_payload = Vec::new();
-    start_payload.extend_from_slice(&file_size.to_be_bytes());
-    start_payload.extend_from_slice(file_name.as_bytes());
     transport.send(&encode_packet(&Packet::new(
         PacketType::Start,
         0,
-        start_payload,
+        encode_start_payload(file_size, &file_name, device_name),
     ))?)?;
 
     sink.emit(PlenumEvent::Transfer(TransferEvent::AwaitingApproval {
         direction: TransferDirection::Send,
         file_name: file_name.clone(),
     }));
-    let (mut sequence_no, resume_bytes) =
+    let (mut sequence_no, resume_bytes, receiver_name) =
         wait_for_accept(transport, control, sink, TransferDirection::Send)?;
 
     if resume_bytes > 0 {
@@ -908,12 +991,15 @@ fn run_send_transfer<T: Transport, S: EventSink>(
         sequence_no,
         Vec::new(),
     ))?)?;
+    let mode = transfer_mode(transport);
     transport.close()?;
 
     let summary = TransferSummary {
         direction: TransferDirection::Send,
         file_name,
         peer: peer_label,
+        peer_name: receiver_name,
+        mode,
         total_bytes: file_size,
         transferred_bytes: file_size,
         resumed_bytes: resume_bytes,
@@ -939,11 +1025,13 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
     started_at: Instant,
     control: &SessionControl,
     auto_accept: bool,
+    device_name: Option<&str>,
 ) -> Result<TransferSummary, AppError> {
     let mut receiver = ReceiverWindow::new();
     let mut file: Option<BufWriter<File>> = None;
     let mut file_name = String::from("received_file");
     let mut file_size = 0u64;
+    let mut sender_name: Option<String> = None;
     let mut bytes_received = 0u64;
     let mut checkpoint: Option<ResumeCheckpoint> = None;
     let mut checkpoint_path: Option<PathBuf> = None;
@@ -958,6 +1046,10 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
     let mut diag_frames: u64 = 0;
     let mut diag_last = now_ms();
     let mut last_frame_at = Instant::now();
+    sink.emit(PlenumEvent::Transfer(TransferEvent::ConnectionEstablished {
+        direction: TransferDirection::Receive,
+        mode: transfer_mode(transport),
+    }));
     sink.emit(PlenumEvent::Log {
         level: LogLevel::Info,
         message: "DIAG recv: transfer loop start, waiting for packets".to_string(),
@@ -1043,16 +1135,11 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
         let packet = parse_packet(&frame)?;
         match packet.packet_type {
             PacketType::Start => {
-                if packet.payload.len() < 8 {
-                    return Err(AppError::InvalidRequest(
-                        "start packet payload must contain file size".into(),
-                    ));
-                }
-
-                let mut size_bytes = [0u8; 8];
-                size_bytes.copy_from_slice(&packet.payload[0..8]);
-                file_size = u64::from_be_bytes(size_bytes);
-                file_name = String::from_utf8_lossy(&packet.payload[8..]).into_owned();
+                let (parsed_size, parsed_name, parsed_sender) =
+                    parse_start_payload(&packet.payload)?;
+                file_size = parsed_size;
+                file_name = parsed_name;
+                sender_name = parsed_sender;
                 let clean_name = Path::new(&file_name)
                     .file_name()
                     .unwrap_or_else(|| std::ffi::OsStr::new("received_file"))
@@ -1089,6 +1176,7 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
                     file_name: file_name.clone(),
                     total_bytes: file_size,
                     peer: Some(peer_label.clone()),
+                    sender_name: sender_name.clone(),
                 }));
                 if !auto_accept {
                     let deadline = Instant::now() + APPROVAL_TIMEOUT;
@@ -1159,11 +1247,10 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
                     ))?)?;
                 }
 
-               
                 transport.send(&encode_packet(&Packet::new(
                     PacketType::Accept,
                     resume_sequence,
-                    Vec::new(),
+                    device_name.map(|name| name.as_bytes().to_vec()).unwrap_or_default(),
                 ))?)?;
 
                 sink.emit(PlenumEvent::Transfer(TransferEvent::Started {
@@ -1277,11 +1364,14 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
         ),
     });
 
+    let mode = transfer_mode(transport);
     let _ = transport.close();
     let summary = TransferSummary {
         direction: TransferDirection::Receive,
         file_name,
         peer: Some(peer_label.clone()),
+        peer_name: sender_name,
+        mode,
         total_bytes: file_size,
         transferred_bytes: bytes_received,
         resumed_bytes: checkpoint
@@ -1357,7 +1447,7 @@ fn wait_for_accept<T: Transport, S: EventSink>(
     control: &SessionControl,
     sink: &mut S,
     direction: TransferDirection,
-) -> Result<(u32, u64), AppError> {
+) -> Result<(u32, u64, Option<String>), AppError> {
     let deadline = Instant::now() + ACCEPT_WAIT_TIMEOUT;
     let mut resume_bytes = 0u64;
     loop {
@@ -1381,9 +1471,13 @@ fn wait_for_accept<T: Transport, S: EventSink>(
             Some(frame) => {
                 let packet = parse_packet(&frame)?;
                 match packet.packet_type {
-                    // `Accept` carries the resume sequence (0 when starting
-                    // fresh), matching any `Resume` that preceded it.
-                    PacketType::Accept => return Ok((packet.sequence_no, resume_bytes)),
+                    PacketType::Accept => {
+                        return Ok((
+                            packet.sequence_no,
+                            resume_bytes,
+                            parse_accept_payload(&packet.payload),
+                        ));
+                    }
                     PacketType::Resume => {
                         resume_bytes = if packet.payload.len() == 8 {
                             let mut bytes = [0u8; 8];
@@ -1478,4 +1572,75 @@ fn prepare_resume_state(
     let checkpoint = ResumeCheckpoint::new(file_name.to_string(), file_size, chunk_size);
     checkpoint.save(checkpoint_path)?;
     Ok((0, 0, file, checkpoint))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn start_payload_legacy_format_parses() {
+        // Old sender: [8B size][fname], no sentinel.
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&1234u64.to_be_bytes());
+        payload.extend_from_slice(b"photo.jpg");
+
+        let (size, name, sender) = parse_start_payload(&payload).unwrap();
+        assert_eq!(size, 1234);
+        assert_eq!(name, "photo.jpg");
+        assert_eq!(sender, None);
+    }
+
+    #[test]
+    fn start_payload_versioned_roundtrip() {
+        let payload = encode_start_payload(987_654_321, "video.mp4", Some("Atharva's Pixel"));
+        assert_eq!(payload[0], START_PAYLOAD_V2_SENTINEL);
+
+        let (size, name, sender) = parse_start_payload(&payload).unwrap();
+        assert_eq!(size, 987_654_321);
+        assert_eq!(name, "video.mp4");
+        assert_eq!(sender.as_deref(), Some("Atharva's Pixel"));
+    }
+
+    #[test]
+    fn start_payload_without_device_name_uses_legacy_format() {
+        // No device name -> legacy layout, so old receivers keep working.
+        let payload = encode_start_payload(42, "doc.pdf", None);
+        assert_ne!(payload[0], START_PAYLOAD_V2_SENTINEL);
+
+        let (size, name, sender) = parse_start_payload(&payload).unwrap();
+        assert_eq!(size, 42);
+        assert_eq!(name, "doc.pdf");
+        assert_eq!(sender, None);
+    }
+
+    #[test]
+    fn start_payload_versioned_empty_device_name_is_none() {
+        let payload = encode_start_payload(42, "doc.pdf", Some(""));
+        let (_, _, sender) = parse_start_payload(&payload).unwrap();
+        assert_eq!(sender, None);
+    }
+
+    #[test]
+    fn start_payload_truncated_versioned_is_rejected() {
+        let mut payload = encode_start_payload(42, "doc.pdf", Some("Laptop"));
+        payload.truncate(10);
+        assert!(parse_start_payload(&payload).is_err());
+
+        // Name length claims more bytes than present.
+        let mut bad = vec![START_PAYLOAD_V2_SENTINEL];
+        bad.extend_from_slice(&42u64.to_be_bytes());
+        bad.extend_from_slice(&100u16.to_be_bytes());
+        bad.extend_from_slice(b"short");
+        assert!(parse_start_payload(&bad).is_err());
+    }
+
+    #[test]
+    fn accept_payload_roundtrip() {
+        assert_eq!(parse_accept_payload(b""), None);
+        assert_eq!(
+            parse_accept_payload("MacBook Pro".as_bytes()),
+            Some("MacBook Pro".to_string())
+        );
+    }
 }

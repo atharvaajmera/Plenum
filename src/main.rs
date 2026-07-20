@@ -231,6 +231,9 @@ impl plenum::app::EventSink for CliEventSink {
                 TransferEvent::AwaitingApproval { .. } => {
                     self.println("Waiting for the receiver to accept the transfer...");
                 }
+                TransferEvent::ConnectionEstablished { mode, .. } => {
+                    self.println(format!("Connection established ({mode:?})"));
+                }
                 TransferEvent::Cancelled { .. } => {
                     if let Some(pb) = self.progress.take() {
                         pb.finish_and_clear();
@@ -293,6 +296,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     file_path,
                     address,
                     discovery_token: token,
+                    device_name: None,
                     permissions,
                     options,
                 },
