@@ -47,7 +47,10 @@ pub fn run() {
             commands::generate_peer_id_command,
             commands::fetch_turn_credentials_command,
             commands::respond_to_incoming_command,
-            commands::cancel_session_command
+            commands::cancel_session_command,
+            commands::send_file_unified_command,
+            commands::receive_file_unified_command,
+            commands::get_local_ips_command
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

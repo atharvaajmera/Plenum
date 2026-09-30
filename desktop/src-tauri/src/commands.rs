@@ -1,8 +1,8 @@
 use plenum::app::engine::PlenumCore;
 use plenum::app::types::{
-    generate_peer_id, generate_room_code, DiscoverRequest, DiscoverySummary, PlenumEvent,
-    ReceiveRemoteRequest, ReceiveRequest, SendRemoteRequest, SendRequest, SessionControl,
-    TransferSummary,
+    generate_peer_id, generate_room_code, get_local_ip_addresses, DiscoverRequest,
+    DiscoverySummary, PlenumEvent, ReceiveRemoteRequest, ReceiveRequest, ReceiveUnifiedRequest,
+    SendRemoteRequest, SendRequest, SendUnifiedRequest, SessionControl, TransferSummary,
 };
 // Only referenced by the dev-only diagnostic logging path.
 #[cfg(debug_assertions)]
@@ -371,3 +371,57 @@ pub async fn fetch_turn_credentials_command(
 ) -> Result<Option<IceServer>, String> {
     Ok(plenum::rtc::turn::fetch_turn_credentials(&relay_server_url, &peer_id).await)
 }
+
+#[tauri::command]
+pub async fn send_file_unified_command(
+    app: AppHandle,
+    mut request: SendUnifiedRequest,
+) -> Result<TransferSummary, String> {
+    if request.device_name.is_none() {
+        request.device_name = default_device_name();
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut core = PlenumCore::new();
+        let session_id = register_session(core.control());
+        let mut sink = |event: PlenumEvent| {
+            emit_event(&app, session_id, event);
+        };
+        let result = core
+            .send_file_unified(request, &mut sink)
+            .map_err(|e| e.to_string());
+        unregister_session(session_id);
+        result
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn receive_file_unified_command(
+    app: AppHandle,
+    mut request: ReceiveUnifiedRequest,
+) -> Result<TransferSummary, String> {
+    if request.device_name.is_none() {
+        request.device_name = default_device_name();
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut core = PlenumCore::new();
+        let session_id = register_session(core.control());
+        let mut sink = |event: PlenumEvent| {
+            emit_event(&app, session_id, event);
+        };
+        let result = core
+            .receive_file_unified(request, &mut sink)
+            .map_err(|e| e.to_string());
+        unregister_session(session_id);
+        result
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub fn get_local_ips_command() -> Vec<String> {
+    get_local_ip_addresses()
+}
+

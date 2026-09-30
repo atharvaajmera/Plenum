@@ -69,6 +69,48 @@ export interface ReceiveRemoteRequest {
     options: TransferOptions;
 }
 
+export interface UnifiedSharePayload {
+    version: number;
+    room_code: string;
+    lan_ips: string[];
+    port: number;
+    pin?: string;
+    peer_id?: string;
+    device_name?: string;
+}
+
+export type SelectedPath =
+    | { Local: { address: string } }
+    | { Internet: { room_code: string, is_relayed: boolean } };
+
+export interface SendUnifiedRequest {
+    file_path: string;
+    payload: UnifiedSharePayload;
+    relay_server_url: string;
+    my_peer_id: string;
+    ice_servers: IceServer[];
+    connect_timeout_secs: number;
+    device_name?: string;
+    permissions: CorePermissions;
+    options: TransferOptions;
+}
+
+export interface ReceiveUnifiedRequest {
+    output_dir: string;
+    relay_server_url: string;
+    session_id: string;
+    my_peer_id: string;
+    ice_servers: IceServer[];
+    connect_timeout_secs: number;
+    port?: number;
+    require_pin?: boolean;
+    auto_accept?: boolean;
+    announce_on_lan?: boolean;
+    device_name?: string;
+    permissions: CorePermissions;
+    options: TransferOptions;
+}
+
 export interface DiscoverySummary {
     hostname: string;
     address: string;
@@ -109,6 +151,7 @@ export interface TransferSummary {
 // Struct variants mapped to standard objects inside the enum
 export type TransferEvent =
     | { StateChanged: { direction: TransferDirection, state: ConnectionState, peer?: string } }
+    | { PathSelected: { direction: TransferDirection, path: SelectedPath, description: string } }
     | { IncomingRequest: { direction: TransferDirection, file_name: string, total_bytes: number, peer?: string, sender_name?: string } }
     | { ConnectionEstablished: { direction: TransferDirection, mode: TransferMode } }
     | { AwaitingApproval: { direction: TransferDirection, file_name: string } }

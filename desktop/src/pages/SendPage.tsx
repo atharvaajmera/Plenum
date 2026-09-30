@@ -3,12 +3,13 @@ import { File, RefreshCcw, Monitor, Wifi, Globe, CheckCircle2 } from "lucide-rea
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
-import { PlenumEventEnvelope, DiscoverRequest, DiscoverySummary, SendRequest, SendRemoteRequest, TransferSummary, TransferEvent, IceServer, TransferUiPhase } from "../types/rust";
+import { PlenumEventEnvelope, DiscoverRequest, DiscoverySummary, SendRequest, SendRemoteRequest, SendUnifiedRequest, TransferSummary, TransferEvent, IceServer, TransferUiPhase } from "../types/rust";
 import { addHistoryEntry } from "../services/history";
 import { formatBytes, formatDuration, progressPercent } from "../utils/format";
 import { isStaleSession, abandonSession } from "../utils/session";
 import { createTransferMetrics, updateTransferMetrics, TransferMetricsState } from "../utils/transferMetrics";
 import { lookupRoomWithGracePeriod, roomLookupMessage } from "../utils/relayUrl";
+import { parseQrPayload } from "../utils/qrPayload";
 import { useSettings } from "../context/SettingsContext";
 import { RELAY_SERVER_URL, DEFAULT_ICE_SERVERS } from "../config";
 
@@ -38,6 +39,7 @@ const friendlyState = (state: string): string => STATE_LABELS[state] ?? "Establi
 const SendPage: React.FC = () => {
   const { settings } = useSettings();
   const [mode, setMode] = useState<"local" | "internet">("local");
+  const [activePathBadge, setActivePathBadge] = useState<string | null>(null);
   const [phase, setPhase] = useState<TransferUiPhase>("idle");
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [peers, setPeers] = useState<DiscoverySummary[]>([]);
@@ -142,6 +144,15 @@ const SendPage: React.FC = () => {
                 setPhase("connecting");
                 setTransferStatus(friendlyState(trans.StateChanged.state));
               }
+            } else if ("PathSelected" in trans) {
+               if ("Local" in trans.PathSelected.path) {
+                 setActivePathBadge(`🟢 Local Wi-Fi (${trans.PathSelected.path.Local.address})`);
+                 setTransferStatus(`Path selected: Local Wi-Fi direct (${trans.PathSelected.path.Local.address})`);
+               } else {
+                 const relayed = trans.PathSelected.path.Internet.is_relayed ? " (Relayed)" : " (Direct P2P)";
+                 setActivePathBadge(`🌐 Internet${relayed}`);
+                 setTransferStatus(`Path selected: Internet via room ${trans.PathSelected.path.Internet.room_code}`);
+               }
             } else if ("Started" in trans) {
                if (autoResetRef.current) clearTimeout(autoResetRef.current);
                setPhase("transferring");
@@ -354,18 +365,22 @@ const SendPage: React.FC = () => {
       setTransferStatus("Please select a file or folder first");
       return;
     }
-    const roomCode = roomCodeInput.trim().toUpperCase();
-    if (roomCode === "") {
-      setTransferStatus("Please enter a room code");
+    const inputVal = roomCodeInput.trim();
+    if (inputVal === "") {
+      setTransferStatus("Please enter a 9-character room code");
       return;
     }
-    if (!/^[A-Z0-9]{9}$/.test(roomCode)) {
-      setTransferStatus("Room codes are 9 letters or numbers");
+
+    const parsed = parseQrPayload(inputVal);
+    if (!parsed || (parsed.type !== "unified" && parsed.type !== "room")) {
+      setTransferStatus("Room codes must be 9 characters (e.g. ABC-123-XYZ)");
       return;
     }
+
+    const roomCode = parsed.code.toUpperCase();
     if (isConnectingRemote || isTransferActive) return;
 
-    setTransferStatus("Finding room…");
+    setTransferStatus("Resolving path…");
     terminalEventRef.current = false;
     setPhase("connecting");
     setIsConnectingRemote(true);
@@ -379,24 +394,42 @@ const SendPage: React.FC = () => {
         peerId: myPeerId,
       });
       if (turn) iceServers.push(turn);
-      const lookup = await lookupRoomWithGracePeriod(RELAY_SERVER_URL, roomCode, undefined, 4000, 500);
-      if (lookup.status !== "exists") {
-        throw new Error(roomLookupMessage(lookup));
+
+      if (parsed.payload) {
+        setTransferStatus("Checking best path (Local Wi-Fi or Internet)…");
+        const req: SendUnifiedRequest = {
+          file_path: selectedPath!,
+          payload: parsed.payload,
+          relay_server_url: RELAY_SERVER_URL,
+          my_peer_id: myPeerId,
+          ice_servers: iceServers,
+          connect_timeout_secs: 30,
+          device_name: settings.deviceName || undefined,
+          permissions: { local_network: true, file_system_read: true, file_system_write: true, background_transfer: false },
+          options: { chunk_size: 32768, window_size: 128, timeout_ticks: 1000 }
+        };
+        const result = await invoke<TransferSummary>("send_file_unified_command", { request: req });
+        console.log("Unified send completed:", result);
+      } else {
+        const lookup = await lookupRoomWithGracePeriod(RELAY_SERVER_URL, roomCode, undefined, 4000, 500);
+        if (lookup.status !== "exists") {
+          throw new Error(roomLookupMessage(lookup));
+        }
+        setTransferStatus("Room found. Connecting…");
+        const req: SendRemoteRequest = {
+          file_path: selectedPath!,
+          relay_server_url: RELAY_SERVER_URL,
+          session_id: roomCode,
+          my_peer_id: myPeerId,
+          ice_servers: iceServers,
+          connect_timeout_secs: 30,
+          device_name: settings.deviceName || undefined,
+          permissions: { local_network: true, file_system_read: true, file_system_write: true, background_transfer: false },
+          options: { chunk_size: 32768, window_size: 128, timeout_ticks: 1000 }
+        };
+        const result = await invoke<TransferSummary>("send_file_remote_command", { request: req });
+        console.log("Send completed:", result);
       }
-      setTransferStatus("Room found. Connecting…");
-      const req: SendRemoteRequest = {
-        file_path: selectedPath!,
-        relay_server_url: RELAY_SERVER_URL,
-        session_id: roomCode,
-        my_peer_id: myPeerId,
-        ice_servers: iceServers,
-        connect_timeout_secs: 30,
-        device_name: settings.deviceName || undefined,
-        permissions: { local_network: true, file_system_read: true, file_system_write: true, background_transfer: false },
-        options: { chunk_size: 32768, window_size: 128, timeout_ticks: 1000 }
-      };
-      const result = await invoke<TransferSummary>("send_file_remote_command", { request: req });
-      console.log("Send completed:", result);
     } catch (err) {
       console.error("Send error:", err);
       if (!terminalEventRef.current) {
@@ -433,6 +466,7 @@ const SendPage: React.FC = () => {
       autoResetRef.current = null;
     }
     setPhase("idle");
+    setActivePathBadge(null);
     setSendSuccess(false);
     setTransferStatus("");
     setProgress(null);
@@ -517,15 +551,15 @@ const SendPage: React.FC = () => {
       {mode === "internet" && (
         <div className="card-section">
           <div className="section-title">
-            <span>Connect via room code</span>
+            <span>Connect via Room Code</span>
           </div>
           <div style={{ display: "flex", gap: "12px" }}>
             <input
               type="text"
               value={roomCodeInput}
               onChange={(e) => setRoomCodeInput(e.target.value)}
-              placeholder="Enter room code"
-              style={{ flex: 1, padding: "10px 12px", borderRadius: "8px", border: "1px solid var(--border-color)", backgroundColor: "var(--bg-sidebar)", color: "var(--text-primary)", outline: "none", fontSize: "14px", letterSpacing: "2px", textTransform: "uppercase" }}
+              placeholder="Enter 9-character room code (e.g. ABC-123-XYZ)"
+              style={{ flex: 1, padding: "10px 12px", borderRadius: "8px", border: "1px solid var(--border-color)", backgroundColor: "var(--bg-sidebar)", color: "var(--text-primary)", outline: "none", fontSize: "14px", letterSpacing: "1px" }}
               onKeyDown={(e) => { if (e.key === "Enter") handleRoomCodeConnect(); }}
             />
             <button
@@ -539,6 +573,11 @@ const SendPage: React.FC = () => {
 
           {transferStatus && (
             <div style={{ marginTop: "24px", padding: "16px", backgroundColor: "var(--bg-card)", borderRadius: "8px", textAlign: "center", border: isSuccess ? "1px solid var(--accent-primary)" : "none" }}>
+              {activePathBadge && (
+                <div style={{ display: "inline-flex", alignItems: "center", gap: "8px", padding: "4px 12px", borderRadius: "12px", backgroundColor: "var(--bg-sidebar)", border: "1px solid var(--border-color)", marginBottom: "10px", fontSize: "12px", fontWeight: 600, color: "var(--text-primary)" }}>
+                  {activePathBadge}
+                </div>
+              )}
               <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "8px", fontSize: "14px", color: isSuccess ? "var(--text-primary)" : "var(--text-secondary)", fontWeight: isSuccess ? 600 : 400 }}>
                 {isSuccess && <CheckCircle2 size={18} color="var(--accent-primary)" />}
                 {transferStatus}
