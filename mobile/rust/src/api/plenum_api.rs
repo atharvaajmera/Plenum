@@ -3,8 +3,10 @@ use flutter_rust_bridge::frb;
 use plenum::app::AppError;
 use plenum::app::engine::PlenumCore;
 use plenum::app::types::{
-    CorePermissions, DiscoverRequest, ReceiveRemoteRequest, ReceiveRequest, SendRemoteRequest,
-    SendRequest, SessionControl, TransferOptions, generate_peer_id, generate_room_code,
+    generate_peer_id, generate_room_code, get_local_ip_addresses, CorePermissions,
+    DiscoverRequest, ReceiveRemoteRequest, ReceiveRequest, ReceiveUnifiedRequest,
+    SendRemoteRequest, SendRequest, SendUnifiedRequest, SessionControl, TransferOptions,
+    UnifiedSharePayload,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -269,3 +271,114 @@ pub fn generate_room_code_sync() -> String {
 pub fn generate_peer_id_sync() -> String {
     generate_peer_id()
 }
+
+/// Retrieves the active, non-loopback local IPv4 addresses of this device.
+#[frb(sync)]
+pub fn get_local_ips_sync() -> Vec<String> {
+    get_local_ip_addresses()
+}
+
+/// Starts an autonomous unified send transfer. Probes LAN endpoints first (Happy Eyeballs),
+/// seamlessly falling back to WebRTC remote transfer if LAN is unreachable or times out.
+pub fn start_send_unified(
+    sink: StreamSink<String>,
+    session_token: String,
+    file_path: String,
+    payload_uri_or_json: String,
+    relay_server_url: String,
+    my_peer_id: String,
+    ice_servers_json: String,
+    connect_timeout_secs: u64,
+    device_name: Option<String>,
+) -> anyhow::Result<String> {
+    let ice_servers = serde_json::from_str(&ice_servers_json)
+        .map_err(|e| anyhow::anyhow!("Invalid ice_servers_json: {}", e))?;
+
+    let payload = if let Ok(parsed) = UnifiedSharePayload::parse_uri(&payload_uri_or_json) {
+        parsed
+    } else {
+        serde_json::from_str(&payload_uri_or_json)
+            .map_err(|e| anyhow::anyhow!("Invalid unified payload: {}", e))?
+    };
+
+    let req = SendUnifiedRequest {
+        file_path: PathBuf::from(file_path),
+        payload,
+        relay_server_url,
+        my_peer_id,
+        ice_servers,
+        connect_timeout_secs,
+        device_name,
+        permissions: CorePermissions::mobile_defaults(),
+        options: TransferOptions::default(),
+    };
+
+    let mut core = PlenumCore::new();
+    register_session(&session_token, core.control());
+    let mut sink_wrapper = |event: plenum::app::types::PlenumEvent| {
+        if let Ok(json) = serde_json::to_string(&event) {
+            let _ = sink.add(json);
+        }
+    };
+
+    let result = core.send_file_unified(req, &mut sink_wrapper);
+    unregister_session(&session_token);
+    match result {
+        Ok(summary) => Ok(serde_json::to_string(&summary).unwrap_or_default()),
+        Err(AppError::Cancelled) => Ok(String::new()),
+        Err(e) => Err(anyhow::anyhow!("Unified send failed: {}", e)),
+    }
+}
+
+/// Starts an autonomous unified receive transfer. Listens concurrently on a local TCP port
+/// and on the WebRTC signaling server. The first viable connection claims the transfer.
+pub fn start_receive_unified(
+    sink: StreamSink<String>,
+    session_token: String,
+    output_dir: String,
+    relay_server_url: String,
+    session_id: String,
+    my_peer_id: String,
+    ice_servers_json: String,
+    connect_timeout_secs: u64,
+    port: u16,
+    require_pin: bool,
+    auto_accept: bool,
+    device_name: Option<String>,
+) -> anyhow::Result<String> {
+    let ice_servers = serde_json::from_str(&ice_servers_json)
+        .map_err(|e| anyhow::anyhow!("Invalid ice_servers_json: {}", e))?;
+
+    let req = ReceiveUnifiedRequest {
+        output_dir: PathBuf::from(output_dir),
+        relay_server_url,
+        session_id,
+        my_peer_id,
+        ice_servers,
+        connect_timeout_secs,
+        port,
+        require_pin,
+        auto_accept,
+        announce_on_lan: true,
+        device_name,
+        permissions: CorePermissions::mobile_defaults(),
+        options: TransferOptions::default(),
+    };
+
+    let mut core = PlenumCore::new();
+    register_session(&session_token, core.control());
+    let mut sink_wrapper = |event: plenum::app::types::PlenumEvent| {
+        if let Ok(json) = serde_json::to_string(&event) {
+            let _ = sink.add(json);
+        }
+    };
+
+    let result = core.receive_file_unified(req, &mut sink_wrapper);
+    unregister_session(&session_token);
+    match result {
+        Ok(summary) => Ok(serde_json::to_string(&summary).unwrap_or_default()),
+        Err(AppError::Cancelled) => Ok(String::new()),
+        Err(e) => Err(anyhow::anyhow!("Unified receive failed: {}", e)),
+    }
+}
+

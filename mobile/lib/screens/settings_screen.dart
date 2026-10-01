@@ -18,18 +18,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        backgroundColor: AppTheme.bgCard,
-        title: const Text('Device Name', style: TextStyle(color: AppTheme.textPrimary)),
+        backgroundColor: AppTheme.bgCardOf(context),
+        title: Text('Device Name', style: TextStyle(color: AppTheme.textPrimaryOf(context))),
         content: TextField(
           controller: controller,
-          style: const TextStyle(color: AppTheme.textPrimary),
-          decoration: const InputDecoration(
-            enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: AppTheme.borderColor)),
-            focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: AppTheme.accentPrimary)),
+          style: TextStyle(color: AppTheme.textPrimaryOf(context)),
+          decoration: InputDecoration(
+            enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: AppTheme.borderColorOf(context))),
+            focusedBorder: const UnderlineInputBorder(borderSide: BorderSide(color: AppTheme.accentPrimary)),
           ),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel', style: TextStyle(color: AppTheme.textSecondary))),
+          TextButton(onPressed: () => Navigator.pop(context), child: Text('Cancel', style: TextStyle(color: AppTheme.textSecondaryOf(context)))),
           TextButton(
             onPressed: () {
               settings.setDeviceName(controller.text.trim());
@@ -53,27 +53,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
       body: ListView(
         padding: const EdgeInsets.all(24),
         children: [
-          const Text('General', style: TextStyle(fontWeight: FontWeight.w600, color: AppTheme.textPrimary, fontSize: 14)),
+          Text('General', style: TextStyle(fontWeight: FontWeight.w600, color: AppTheme.textPrimaryOf(context), fontSize: 14)),
           const SizedBox(height: 16),
           _buildCard([
             ListTile(
-              title: const Text('Device Name', style: TextStyle(color: AppTheme.textPrimary)),
-              subtitle: Text(settings.deviceName, style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
-              trailing: const Icon(Icons.edit, color: AppTheme.textSecondary, size: 20),
+              title: Text('Device Name', style: TextStyle(color: AppTheme.textPrimaryOf(context))),
+              subtitle: Text(settings.deviceName, style: TextStyle(color: AppTheme.textSecondaryOf(context), fontSize: 12)),
+              trailing: Icon(Icons.edit, color: AppTheme.textSecondaryOf(context), size: 20),
               onTap: () => _editDeviceName(settings),
             ),
             _divider(),
             SwitchListTile(
-              title: const Text('Require PIN for incoming', style: TextStyle(color: AppTheme.textPrimary)),
-              subtitle: const Text('Senders must enter your code', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+              title: Text('Require PIN for incoming', style: TextStyle(color: AppTheme.textPrimaryOf(context))),
+              subtitle: Text('Senders must enter your code', style: TextStyle(color: AppTheme.textSecondaryOf(context), fontSize: 12)),
               value: settings.requirePin,
               activeThumbColor: AppTheme.accentPrimary,
               onChanged: settings.setRequirePin,
             ),
             _divider(),
             SwitchListTile(
-              title: const Text('Auto-accept files', style: TextStyle(color: AppTheme.textPrimary)),
-              subtitle: const Text('Automatically receive incoming files', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+              title: Text('Auto-accept files', style: TextStyle(color: AppTheme.textPrimaryOf(context))),
+              subtitle: Text('Automatically receive incoming files', style: TextStyle(color: AppTheme.textSecondaryOf(context), fontSize: 12)),
               value: settings.autoAccept,
               activeThumbColor: AppTheme.accentPrimary,
               onChanged: settings.setAutoAccept,
@@ -81,16 +81,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ]),
 
           const SizedBox(height: 24),
-          const Text('Preferences', style: TextStyle(fontWeight: FontWeight.w600, color: AppTheme.textPrimary, fontSize: 14)),
+          Text('Preferences', style: TextStyle(fontWeight: FontWeight.w600, color: AppTheme.textPrimaryOf(context), fontSize: 14)),
           const SizedBox(height: 16),
           _buildCard([
             ListTile(
-              title: const Text('Theme', style: TextStyle(color: AppTheme.textPrimary)),
+              title: Text('Theme', style: TextStyle(color: AppTheme.textPrimaryOf(context))),
               trailing: DropdownButton<ThemeMode>(
                 value: settings.themeMode,
-                dropdownColor: AppTheme.bgCardHover,
+                dropdownColor: AppTheme.bgCardHoverOf(context),
                 underline: const SizedBox(),
-                style: const TextStyle(color: AppTheme.textPrimary),
+                style: TextStyle(color: AppTheme.textPrimaryOf(context)),
                 items: const [
                   DropdownMenuItem(value: ThemeMode.system, child: Text('System')),
                   DropdownMenuItem(value: ThemeMode.light, child: Text('Light')),
@@ -104,12 +104,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ]),
 
           const SizedBox(height: 24),
-          const Text('History', style: TextStyle(fontWeight: FontWeight.w600, color: AppTheme.textPrimary, fontSize: 14)),
+          Text('History', style: TextStyle(fontWeight: FontWeight.w600, color: AppTheme.textPrimaryOf(context), fontSize: 14)),
           const SizedBox(height: 16),
           _buildCard([
             ListTile(
-              title: const Text('Transfer History', style: TextStyle(color: AppTheme.textPrimary)),
-              trailing: const Icon(Icons.chevron_right, color: AppTheme.textSecondary),
+              title: Text('Transfer History', style: TextStyle(color: AppTheme.textPrimaryOf(context))),
+              trailing: Icon(Icons.chevron_right, color: AppTheme.textSecondaryOf(context)),
               onTap: () {
                 Navigator.push(context, MaterialPageRoute(builder: (context) => const TransferHistoryScreen()));
               },
@@ -117,13 +117,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ]),
 
           const SizedBox(height: 24),
-          const Text('About', style: TextStyle(fontWeight: FontWeight.w600, color: AppTheme.textPrimary, fontSize: 14)),
+          Text('About', style: TextStyle(fontWeight: FontWeight.w600, color: AppTheme.textPrimaryOf(context), fontSize: 14)),
           const SizedBox(height: 16),
           _buildCard([
             ListTile(
-              title: const Text('About Plenum', style: TextStyle(color: AppTheme.textPrimary)),
-              subtitle: const Text('Version, how transfers work, save location', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
-              trailing: const Icon(Icons.chevron_right, color: AppTheme.textSecondary),
+              title: Text('About Plenum', style: TextStyle(color: AppTheme.textPrimaryOf(context))),
+              subtitle: Text('Version, how transfers work, save location', style: TextStyle(color: AppTheme.textSecondaryOf(context), fontSize: 12)),
+              trailing: Icon(Icons.chevron_right, color: AppTheme.textSecondaryOf(context)),
               onTap: () {
                 Navigator.push(context, MaterialPageRoute(builder: (context) => const AboutScreen()));
               },
@@ -138,9 +138,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Widget _buildCard(List<Widget> children) {
     return Container(
       decoration: BoxDecoration(
-        color: AppTheme.bgCard,
+        color: AppTheme.bgCardOf(context),
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: AppTheme.borderColor),
+        border: Border.all(color: AppTheme.borderColorOf(context)),
       ),
       child: Column(
         children: children,
@@ -149,6 +149,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Widget _divider() {
-    return const Divider(height: 1, thickness: 1, color: AppTheme.borderColor);
+    return Divider(height: 1, thickness: 1, color: AppTheme.borderColorOf(context));
   }
 }

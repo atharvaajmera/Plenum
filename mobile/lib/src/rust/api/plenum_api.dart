@@ -61,6 +61,14 @@ Stream<String> startReceive({
   autoAccept: autoAccept,
 );
 
+/// Sends a file over the internet via a relay/signaling server, negotiating a
+/// WebRTC data channel. Mirrors `start_send`, but for internet (non-LAN) transfers.
+///
+/// `ice_servers_json` is a JSON-encoded array of `{ urls: string[], username?:
+/// string, credential?: string }`, matching `plenum::signaling::IceServer`.
+/// Passed as JSON (rather than a plain FFI struct) because `IceServer` is
+/// defined in the `plenum` crate, so flutter_rust_bridge would otherwise
+/// generate it as an opaque handle Dart cannot construct field-by-field.
 Stream<String> startSendRemote({
   required String sessionToken,
   required String filePath,
@@ -107,8 +115,66 @@ Stream<String> startReceiveRemote({
   deviceName: deviceName,
 );
 
+/// Generates a display-ready room code for internet transfers, without
+/// blocking on a relay-server connection (so the receive UI can show it
+/// immediately).
 String generateRoomCodeSync() =>
     RustLib.instance.api.crateApiPlenumApiGenerateRoomCodeSync();
 
+/// Generates a random per-connection peer id for internet transfers.
 String generatePeerIdSync() =>
     RustLib.instance.api.crateApiPlenumApiGeneratePeerIdSync();
+
+/// Retrieves the active, non-loopback local IPv4 addresses of this device.
+List<String> getLocalIpsSync() =>
+    RustLib.instance.api.crateApiPlenumApiGetLocalIpsSync();
+
+/// Starts an autonomous unified send transfer. Probes LAN endpoints first (Happy Eyeballs),
+/// seamlessly falling back to WebRTC remote transfer if LAN is unreachable or times out.
+Stream<String> startSendUnified({
+  required String sessionToken,
+  required String filePath,
+  required String payloadUriOrJson,
+  required String relayServerUrl,
+  required String myPeerId,
+  required String iceServersJson,
+  required BigInt connectTimeoutSecs,
+  String? deviceName,
+}) => RustLib.instance.api.crateApiPlenumApiStartSendUnified(
+  sessionToken: sessionToken,
+  filePath: filePath,
+  payloadUriOrJson: payloadUriOrJson,
+  relayServerUrl: relayServerUrl,
+  myPeerId: myPeerId,
+  iceServersJson: iceServersJson,
+  connectTimeoutSecs: connectTimeoutSecs,
+  deviceName: deviceName,
+);
+
+/// Starts an autonomous unified receive transfer. Listens concurrently on a local TCP port
+/// and on the WebRTC signaling server. The first viable connection claims the transfer.
+Stream<String> startReceiveUnified({
+  required String sessionToken,
+  required String outputDir,
+  required String relayServerUrl,
+  required String sessionId,
+  required String myPeerId,
+  required String iceServersJson,
+  required BigInt connectTimeoutSecs,
+  required int port,
+  required bool requirePin,
+  required bool autoAccept,
+  String? deviceName,
+}) => RustLib.instance.api.crateApiPlenumApiStartReceiveUnified(
+  sessionToken: sessionToken,
+  outputDir: outputDir,
+  relayServerUrl: relayServerUrl,
+  sessionId: sessionId,
+  myPeerId: myPeerId,
+  iceServersJson: iceServersJson,
+  connectTimeoutSecs: connectTimeoutSecs,
+  port: port,
+  requirePin: requirePin,
+  autoAccept: autoAccept,
+  deviceName: deviceName,
+);

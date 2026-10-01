@@ -59,7 +59,7 @@ class _AnimatedRadarState extends State<AnimatedRadar> with SingleTickerProvider
                 child: CustomPaint(
                   size: const Size(150, 150),
                   painter: _SegmentedRingPainter(
-                    color: widget.isListening ? AppTheme.accentPrimary : AppTheme.borderColor,
+                    color: widget.isListening ? AppTheme.accentPrimary : AppTheme.borderColorOf(context),
                   ),
                 ),
               );
@@ -71,9 +71,9 @@ class _AnimatedRadarState extends State<AnimatedRadar> with SingleTickerProvider
             height: 40,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              color: AppTheme.bgApp,
+              color: AppTheme.bgAppOf(context),
               border: Border.all(
-                color: widget.isListening ? AppTheme.accentPrimary : AppTheme.borderColor,
+                color: widget.isListening ? AppTheme.accentPrimary : AppTheme.borderColorOf(context),
                 width: 2,
               ),
               boxShadow: widget.isListening
@@ -89,7 +89,7 @@ class _AnimatedRadarState extends State<AnimatedRadar> with SingleTickerProvider
             child: Icon(
               Icons.radar,
               size: 20,
-              color: widget.isListening ? AppTheme.accentPrimary : AppTheme.borderColor,
+              color: widget.isListening ? AppTheme.accentPrimary : AppTheme.borderColorOf(context),
             ),
           ),
         ],

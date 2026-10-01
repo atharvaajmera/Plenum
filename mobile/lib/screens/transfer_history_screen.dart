@@ -17,11 +17,11 @@ class TransferHistoryScreen extends StatelessWidget {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Transfer History', style: TextStyle(color: AppTheme.textPrimary, fontSize: 18)),
+        title: Text('Transfer History', style: TextStyle(color: AppTheme.textPrimaryOf(context), fontSize: 18)),
       ),
       body: history.isEmpty
-          ? const Center(
-              child: Text('No past transfers', style: TextStyle(color: AppTheme.textSecondary)),
+          ? Center(
+              child: Text('No past transfers', style: TextStyle(color: AppTheme.textSecondaryOf(context))),
             )
           : ListView.builder(
               itemCount: history.length,
@@ -42,27 +42,27 @@ class TransferHistoryScreen extends StatelessWidget {
 
                 return ListTile(
                   leading: CircleAvatar(
-                    backgroundColor: AppTheme.bgCardHover,
+                    backgroundColor: AppTheme.bgCardHoverOf(context),
                     child: Icon(
                       isSend ? Icons.upload : Icons.download,
                       color: isSend ? AppTheme.accentPrimary : Colors.blueAccent,
                       size: 18,
                     ),
                   ),
-                  title: Text(fileName, style: const TextStyle(color: AppTheme.textPrimary)),
+                  title: Text(fileName, style: TextStyle(color: AppTheme.textPrimaryOf(context))),
                   subtitle: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
                         '${isSend ? 'To' : 'From'} $peer • ${formatBytes(size)} • $durationStr$resumedStr',
-                        style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+                        style: TextStyle(color: AppTheme.textSecondaryOf(context), fontSize: 12),
                       ),
                       const SizedBox(height: 2),
                       Row(
                         children: [
                           _ModeChip(label: modeLabel ?? '—'),
                           const SizedBox(width: 6),
-                          Text(timeStr, style: const TextStyle(color: AppTheme.textSecondary, fontSize: 11)),
+                          Text(timeStr, style: TextStyle(color: AppTheme.textSecondaryOf(context), fontSize: 11)),
                         ],
                       ),
                     ],

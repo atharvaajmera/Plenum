@@ -16,15 +16,40 @@ class AppTheme {
   static const Color borderColor = Color(0xFF3B4B5E);
 
   // Light Palette
-  static const Color bgAppLight = Color(0xFFF1F5F9);
-  static const Color bgSidebarLight = Color(0xFFE2E8F0);
+  static const Color bgAppLight = Color(0xFFF8FAFB);
+  static const Color bgSidebarLight = Color(0xFFEFF3F6);
   static const Color bgCardLight = Color(0xFFFFFFFF);
-  static const Color bgCardHoverLight = Color(0xFFF8FAFC);
+  static const Color bgCardHoverLight = Color(0xFFF1F5F9);
 
-  static const Color textPrimaryLight = Color(0xFF0F172A);
+  static const Color textPrimaryLight = Color(0xFF1E293B);
   static const Color textSecondaryLight = Color(0xFF64748B);
 
-  static const Color borderColorLight = Color(0xFFCBD5E1);
+  static const Color borderColorLight = Color(0xFFE2E8F0);
+
+  // Theme-aware helpers
+  static bool isDark(BuildContext context) =>
+      Theme.of(context).brightness == Brightness.dark;
+
+  static Color bgAppOf(BuildContext context) =>
+      isDark(context) ? bgApp : bgAppLight;
+
+  static Color bgSidebarOf(BuildContext context) =>
+      isDark(context) ? bgSidebar : bgSidebarLight;
+
+  static Color bgCardOf(BuildContext context) =>
+      isDark(context) ? bgCard : bgCardLight;
+
+  static Color bgCardHoverOf(BuildContext context) =>
+      isDark(context) ? bgCardHover : bgCardHoverLight;
+
+  static Color textPrimaryOf(BuildContext context) =>
+      isDark(context) ? textPrimary : textPrimaryLight;
+
+  static Color textSecondaryOf(BuildContext context) =>
+      isDark(context) ? textSecondary : textSecondaryLight;
+
+  static Color borderColorOf(BuildContext context) =>
+      isDark(context) ? borderColor : borderColorLight;
 
   static ThemeData get darkTheme {
     return ThemeData(

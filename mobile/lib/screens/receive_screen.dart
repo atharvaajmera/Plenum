@@ -20,6 +20,8 @@ import '../utils/transfer_status.dart';
 import '../utils/formatters.dart';
 import '../utils/transfer_metrics.dart';
 import '../widgets/success_check.dart';
+import 'package:qr_flutter/qr_flutter.dart';
+import '../utils/qr_payload.dart';
 import 'settings_screen.dart';
 
 class ReceiveScreen extends StatefulWidget {
@@ -30,7 +32,6 @@ class ReceiveScreen extends StatefulWidget {
 }
 
 class _ReceiveScreenState extends State<ReceiveScreen> {
-  TransferMode _mode = TransferMode.local;
   TransferUiPhase _phase = TransferUiPhase.idle;
   bool _terminalEventReceived = false;
 
@@ -38,11 +39,11 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
   String _statusMessage = 'Tap radar to start receiving';
   String? _pin;
   double? _progress;
-  bool _copied = false;
 
   String? _roomCode;
   bool _roomCodeCopied = false;
-  bool _remoteStarted = false;
+  String? _unifiedQrPayload;
+  String? _selectedPathBadge;
 
   StreamSubscription<String>? _localSub;
   StreamSubscription<String>? _remoteSub;
@@ -74,7 +75,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
 
   @override
   void dispose() {
-    final active = _isListening || _remoteStarted;
+    final active = _isListening;
     final token = _sessionToken;
     if (token != null && !active) {
       try {
@@ -121,13 +122,14 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     _reArmTimer?.cancel();
     setState(() {
       _isListening = false;
-      _remoteStarted = false;
       if (resetPhase) {
         _phase = TransferUiPhase.idle;
         _terminalEventReceived = false;
       }
       _statusMessage = 'Tap radar to start receiving';
       _pin = null;
+      _unifiedQrPayload = null;
+      _selectedPathBadge = null;
       _requirePinActive = false;
       _roomCode = null;
       _progress = null;
@@ -142,7 +144,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     });
   }
 
-  Future<void> _startLocalReceiver() async {
+  Future<void> _startUnifiedReceiver() async {
     if (_isListening) return;
 
     final grantedStorage = await ReceiveStorage.ensurePermission();
@@ -170,6 +172,26 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     final deviceName = settings.deviceName;
     final requirePin = settings.requirePin;
     final autoAccept = settings.autoAccept;
+    final relayServerUrl = settings.relayServerUrl;
+
+    final code = generateRoomCodeSync();
+    final myPeerId = generatePeerIdSync();
+    final localIps = getLocalIpsSync();
+
+    final iceServers = settings.iceServers
+        .split('\n')
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .map((e) => IceServerSetting(urls: e))
+        .toList();
+
+    final iceServersJson = await InternetSettings.buildIceServersJsonWithTurn(
+      relayServerUrl,
+      myPeerId,
+      iceServers,
+    );
+
+    if (!mounted) return;
 
     setState(() {
       _isListening = true;
@@ -177,7 +199,15 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
       _terminalEventReceived = false;
       _requirePinActive = requirePin;
       _autoAcceptActive = autoAccept;
-      _statusMessage = 'Listening for incoming files...';
+      _roomCode = code;
+      _selectedPathBadge = null;
+      _statusMessage = 'Ready to receive files (Wi-Fi & Internet active)';
+      _unifiedQrPayload = QrPayload.encodeUnified(UnifiedSharePayload(
+        roomCode: code,
+        lanIps: localIps,
+        peerId: myPeerId,
+        deviceName: deviceName,
+      ));
     });
 
     Object? lockToken;
@@ -188,21 +218,25 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
       if (mounted) {
         _handleLogEvent({
           'level': 'Warn',
-          'message': 'Transfer lock unavailable; the transfer may pause when the screen is off: $error',
+          'message': 'Transfer lock unavailable: $error',
         });
       }
     }
 
     final sessionToken = DateTime.now().millisecondsSinceEpoch.toString();
     _sessionToken = sessionToken;
-    _localSub = startReceive(
-      outputDir: outputDir,
-      port: 0,
-      announce: true,
-      deviceName: deviceName,
+    _localSub = startReceiveUnified(
       sessionToken: sessionToken,
+      outputDir: outputDir,
+      relayServerUrl: relayServerUrl,
+      sessionId: code,
+      myPeerId: myPeerId,
+      iceServersJson: iceServersJson,
+      connectTimeoutSecs: BigInt.from(600),
+      port: 0,
       requirePin: requirePin,
       autoAccept: autoAccept,
+      deviceName: deviceName,
     ).listen((eventJson) {
       if (!mounted) return;
       final event = jsonDecode(eventJson);
@@ -215,13 +249,39 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
       if (event['Discovery'] != null) {
         final discEvent = event['Discovery'];
         if (discEvent['BroadcastStarted'] != null) {
+          final token = discEvent['BroadcastStarted']['token']?.toString();
+          final port = discEvent['BroadcastStarted']['port'] as int?;
           setState(() {
-            _pin = discEvent['BroadcastStarted']['token'];
+            _pin = token;
             _statusMessage = 'Ready to receive files';
+            _unifiedQrPayload = QrPayload.encodeUnified(UnifiedSharePayload(
+              roomCode: code,
+              lanIps: localIps,
+              port: port ?? 0,
+              pin: token,
+              peerId: myPeerId,
+              deviceName: deviceName,
+            ));
           });
         }
       } else if (event['Transfer'] != null) {
-        _handleTransferEvent(event['Transfer'], outputDir, lockToken);
+        final trans = event['Transfer'];
+        if (trans['PathSelected'] != null) {
+          final path = trans['PathSelected']['path'];
+          setState(() {
+            if (path is Map && path['Local'] != null) {
+              final addr = path['Local']['address'] ?? '';
+              _selectedPathBadge = 'Local Wi-Fi ($addr)';
+            } else if (path == 'DirectLan' || (path is Map && path.containsKey('DirectLan'))) {
+              _selectedPathBadge = 'Local Wi-Fi (Direct)';
+            } else if (path is Map && path['Internet'] != null) {
+              _selectedPathBadge = 'Internet (${path['Internet']['connection_type'] ?? 'P2P'})';
+            } else {
+              _selectedPathBadge = 'Internet ($path)';
+            }
+          });
+        }
+        _handleTransferEvent(trans, outputDir, lockToken);
       }
     }, onDone: () {
       TransferLock.release(lockToken);
@@ -238,9 +298,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
       TransferLock.release(lockToken);
       _lockToken = null;
       if (mounted) {
-        if (_terminalEventReceived || _phase.isTerminal) {
-          return;
-        }
+        if (_terminalEventReceived || _phase.isTerminal) return;
         setState(() {
           _terminalEventReceived = true;
           _phase = TransferUiPhase.failed;
@@ -250,6 +308,8 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
       }
     });
   }
+
+
 
   void _handleTransferEvent(dynamic transEvent, String outputDir, Object? lockToken) {
     if (transEvent['StateChanged'] != null) {
@@ -467,11 +527,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     // Delete the app-dir copy now that the user has had time to Open/Share.
     _deleteAppDirCopyIfExported();
     _stopReceiving(resetPhase: true);
-    if (_mode == TransferMode.local) {
-      _startLocalReceiver();
-    } else {
-      _setupRemoteReceiver();
-    }
+    _startUnifiedReceiver();
   }
 
   Future<void> _showIncomingRequestDialog({
@@ -495,18 +551,18 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
           children: [
             Text(fileName, style: const TextStyle(fontWeight: FontWeight.bold)),
             const SizedBox(height: 4),
-            Text(formatBytes(totalBytes), style: const TextStyle(color: AppTheme.textSecondary)),
+            Text(formatBytes(totalBytes), style: TextStyle(color: AppTheme.textSecondaryOf(context))),
             if (senderName != null) ...[
               const SizedBox(height: 8),
               Text('From: $senderName',
-                  style: const TextStyle(color: AppTheme.textPrimary, fontWeight: FontWeight.w600, fontSize: 14)),
+                  style: TextStyle(color: AppTheme.textPrimaryOf(context), fontWeight: FontWeight.w600, fontSize: 14)),
               if (peer != null) ...[
                 const SizedBox(height: 2),
-                Text(peer, style: const TextStyle(color: AppTheme.textSecondary, fontSize: 11)),
+                Text(peer, style: TextStyle(color: AppTheme.textSecondaryOf(context), fontSize: 11)),
               ],
             ] else if (peer != null) ...[
               const SizedBox(height: 4),
-              Text('From: $peer', style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+              Text('From: $peer', style: TextStyle(color: AppTheme.textSecondaryOf(context), fontSize: 12)),
             ],
           ],
         ),
@@ -531,170 +587,6 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     }
   }
 
-  Future<void> _setupRemoteReceiver() async {
-    _stopReceiving();
-    if (_remoteStarted) return;
-    _remoteStarted = true;
-
-    final settings = context.read<SettingsService>();
-    final relayServerUrl = settings.relayServerUrl;
-    final autoAccept = settings.autoAccept;
-    _autoAcceptActive = autoAccept;
-    final iceServers = settings.iceServers
-        .split('\n')
-        .map((e) => e.trim())
-        .where((e) => e.isNotEmpty)
-        .map((e) => IceServerSetting(urls: e))
-        .toList();
-
-    final granted = await ReceiveStorage.ensurePermission();
-    if (!granted) {
-      if (mounted) {
-        setState(() => _statusMessage = 'Storage permission needed to save files');
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: const Text('Storage permission is required to save files to Download'),
-          action: SnackBarAction(label: 'Settings', onPressed: () => openAppSettings()),
-        ));
-      }
-      _remoteStarted = false;
-      return;
-    }
-    if (!mounted) return;
-
-    setState(() {
-      _phase = TransferUiPhase.connecting;
-      _statusMessage = 'Creating secure room...';
-      _terminalEventReceived = false;
-      _roomCode = null;
-      _progress = null;
-      _remoteStarted = true;
-    });
-
-    final code = generateRoomCodeSync();
-    final myPeerId = generatePeerIdSync();
-
-    final outputDir = await ReceiveStorage.outputDir();
-    final iceServersJson = await InternetSettings.buildIceServersJsonWithTurn(
-      relayServerUrl,
-      myPeerId,
-      iceServers,
-    );
-
-    if (!mounted || _mode != TransferMode.internet) return;
-
-    Object? lockToken;
-    try {
-      lockToken = await TransferLock.acquire();
-      _lockToken = lockToken;
-    } catch (error) {
-      if (mounted) {
-        _handleLogEvent({
-          'level': 'Warn',
-          'message': 'Transfer lock unavailable; the transfer may pause when the screen is off: $error',
-        });
-      }
-    }
-
-    final sessionToken = DateTime.now().millisecondsSinceEpoch.toString();
-    _sessionToken = sessionToken;
-    _remoteSub = startReceiveRemote(
-      outputDir: outputDir,
-      relayServerUrl: relayServerUrl,
-      sessionId: code,
-      myPeerId: myPeerId,
-      iceServersJson: iceServersJson,
-      connectTimeoutSecs: BigInt.from(600),
-      sessionToken: sessionToken,
-      autoAccept: autoAccept,
-      deviceName: settings.deviceName,
-    ).listen((eventJson) {
-      if (!mounted) return;
-      final event = jsonDecode(eventJson);
-      if (event['Log'] != null) {
-        _handleLogEvent(event['Log']);
-        return;
-      }
-      if (event['Transfer'] != null) {
-        _handleTransferEvent(event['Transfer'], outputDir, lockToken);
-      }
-    }, onDone: () {
-      TransferLock.release(lockToken);
-      _lockToken = null;
-      if (mounted) {
-        setState(() {
-          _remoteStarted = false;
-          if (!_terminalEventReceived && !_phase.isTerminal) {
-            _phase = TransferUiPhase.idle;
-          }
-        });
-      }
-    }, onError: (e) {
-      TransferLock.release(lockToken);
-      _lockToken = null;
-      if (mounted) {
-        if (_terminalEventReceived) return;
-        setState(() {
-          _terminalEventReceived = true;
-          _phase = TransferUiPhase.failed;
-          _remoteStarted = false;
-          _statusMessage = friendlyError(e);
-        });
-      }
-    });
-
-    final regResult = await InternetSettings.waitForRoomRegistration(
-      relayServerUrl,
-      code,
-      timeout: const Duration(seconds: 10),
-      isCancelled: () => !mounted || _sessionToken != sessionToken || _mode != TransferMode.internet,
-    );
-
-    if (!mounted || _sessionToken != sessionToken || _mode != TransferMode.internet) {
-      return;
-    }
-
-    if (!regResult.exists) {
-      cancelSession(sessionToken: sessionToken);
-      TransferLock.release(lockToken);
-      _lockToken = null;
-      if (mounted) {
-        setState(() {
-          _terminalEventReceived = true;
-          _phase = TransferUiPhase.failed;
-          _remoteStarted = false;
-          _statusMessage = regResult.userMessage.isNotEmpty
-              ? regResult.userMessage
-              : 'Could not create the room. Try again.';
-        });
-      }
-      return;
-    }
-
-    setState(() {
-      _roomCode = code;
-      _phase = TransferUiPhase.listening;
-      _statusMessage = 'Ready to receive files';
-    });
-  }
-
-  Future<void> _copyPin() async {
-    if (_pin == null) return;
-    try {
-      await Clipboard.setData(ClipboardData(text: _pin!));
-      if (!mounted) return;
-      setState(() => _copied = true);
-      Future.delayed(const Duration(seconds: 2), () {
-        if (mounted) setState(() => _copied = false);
-      });
-    } catch (_) {
-      // handle clipboard access denied
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Could not copy — copy the code manually')),
-        );
-      }
-    }
-  }
 
   Future<void> _copyRoomCode() async {
     if (_roomCode == null) return;
@@ -768,108 +660,283 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
     }
   }
 
-  void _switchMode(TransferMode mode) {
-    if (mode == _mode) return;
-    _stopReceiving();
-    setState(() {
-      _mode = mode;
-      _statusMessage = mode == TransferMode.local
-          ? 'Tap radar to start receiving'
-          : 'Preparing...';
-    });
-    if (mode == TransferMode.internet) {
-      _setupRemoteReceiver();
-    }
-  }
-
-  Widget _buildCodeCard({
-    required String caption,
-    required String code,
-    required bool copied,
-    required VoidCallback onCopy,
-    VoidCallback? onShare,
-    String? footer,
-  }) {
+  Widget _buildUnifiedCard() {
+    if (_roomCode == null) return const SizedBox.shrink();
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
       decoration: BoxDecoration(
-        color: AppTheme.bgCard,
-        borderRadius: BorderRadius.circular(12),
+        color: AppTheme.bgCardOf(context),
+        borderRadius: BorderRadius.circular(14),
         border: Border.all(color: AppTheme.accentPrimary),
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text(
-            caption,
-            style: const TextStyle(fontSize: 12, color: AppTheme.textSecondary),
-            textAlign: TextAlign.center,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-          ),
-          const SizedBox(height: 8),
+          if (_selectedPathBadge != null) ...[
+            Container(
+              margin: const EdgeInsets.only(bottom: 8),
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              decoration: BoxDecoration(
+                color: _selectedPathBadge!.contains('Local')
+                    ? const Color(0xFF166534).withValues(alpha: 0.3)
+                    : const Color(0xFF1E40AF).withValues(alpha: 0.3),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                  color: _selectedPathBadge!.contains('Local')
+                       ? const Color(0xFF22C55E).withValues(alpha: 0.5)
+                      : const Color(0xFF3B82F6).withValues(alpha: 0.5),
+                ),
+              ),
+              child: Text(
+                _selectedPathBadge!,
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: _selectedPathBadge!.contains('Local')
+                      ? const Color(0xFF4ADE80)
+                      : const Color(0xFF60A5FA),
+                ),
+              ),
+            ),
+          ],
           Row(
             children: [
               Expanded(
-                child: FittedBox(
-                  fit: BoxFit.scaleDown,
-                  alignment: Alignment.center,
-                  child: Text(
-                    code,
-                    style: const TextStyle(
-                      fontSize: 26,
-                      fontWeight: FontWeight.bold,
-                      letterSpacing: 4,
-                      color: AppTheme.accentPrimary,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      'Room Code',
+                      style: TextStyle(fontSize: 12, color: AppTheme.textSecondaryOf(context)),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                     ),
-                    maxLines: 1,
-                  ),
+                    const SizedBox(height: 4),
+                    FittedBox(
+                      fit: BoxFit.scaleDown,
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        _roomCode!,
+                        style: const TextStyle(
+                          fontSize: 26,
+                          fontWeight: FontWeight.bold,
+                          letterSpacing: 3,
+                          color: AppTheme.accentPrimary,
+                        ),
+                        maxLines: 1,
+                      ),
+                    ),
+                    if (_requirePinActive && _pin != null) ...[
+                      const SizedBox(height: 2),
+                      Text(
+                        'PIN: $_pin',
+                        style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppTheme.textSecondaryOf(context)),
+                      ),
+                    ],
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        GestureDetector(
+                          onTap: _copyRoomCode,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                            decoration: BoxDecoration(
+                              color: AppTheme.bgSidebarOf(context),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  _roomCodeCopied ? Icons.check : Icons.copy,
+                                  size: 16,
+                                  color: _roomCodeCopied ? AppTheme.accentPrimary : AppTheme.textSecondaryOf(context),
+                                ),
+                                const SizedBox(width: 4),
+                                Text(
+                                  _roomCodeCopied ? 'Copied' : 'Copy',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: _roomCodeCopied ? AppTheme.accentPrimary : AppTheme.textSecondaryOf(context),
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        GestureDetector(
+                          // ignore: deprecated_member_use
+                          onTap: () => Share.share('Use this code to send files on Plenum: $_roomCode'),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                            decoration: BoxDecoration(
+                              color: AppTheme.bgSidebarOf(context),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(Icons.share, size: 16, color: AppTheme.textSecondaryOf(context)),
+                                const SizedBox(width: 4),
+                                Text(
+                                  'Share',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: AppTheme.textSecondaryOf(context),
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
                 ),
               ),
-              const SizedBox(width: 8),
-              GestureDetector(
-                onTap: onCopy,
-                child: Container(
-                  padding: const EdgeInsets.all(8),
-                  decoration: BoxDecoration(
-                    color: AppTheme.bgSidebar,
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Icon(
-                    copied ? Icons.check : Icons.copy,
-                    size: 18,
-                    color: copied ? AppTheme.accentPrimary : AppTheme.textSecondary,
-                  ),
-                ),
-              ),
-              if (onShare != null) ...[
-                const SizedBox(width: 6),
+              if (_unifiedQrPayload != null) ...[
+                const SizedBox(width: 12),
                 GestureDetector(
-                  onTap: onShare,
+                  onTap: () => _showEnlargedQrDialog(context),
                   child: Container(
-                    padding: const EdgeInsets.all(8),
+                    padding: const EdgeInsets.all(6),
                     decoration: BoxDecoration(
-                      color: AppTheme.bgSidebar,
-                      borderRadius: BorderRadius.circular(8),
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(10),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: 0.25),
+                          blurRadius: 6,
+                          offset: const Offset(0, 2),
+                        ),
+                      ],
                     ),
-                    child: const Icon(Icons.share, size: 18, color: AppTheme.textSecondary),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        QrImageView(
+                          data: _unifiedQrPayload!,
+                          version: QrVersions.auto,
+                          size: 88,
+                          backgroundColor: Colors.white,
+                          padding: const EdgeInsets.all(2),
+                          eyeStyle: const QrEyeStyle(
+                            eyeShape: QrEyeShape.square,
+                            color: Colors.black,
+                          ),
+                          dataModuleStyle: const QrDataModuleStyle(
+                            dataModuleShape: QrDataModuleShape.square,
+                            color: Colors.black,
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        const Text(
+                          'Tap to enlarge',
+                          style: TextStyle(
+                            fontSize: 9,
+                            fontWeight: FontWeight.w600,
+                            color: Colors.black54,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ],
             ],
           ),
-          if (footer != null) ...[
-            const SizedBox(height: 8),
-            Text(
-              footer,
-              style: const TextStyle(fontSize: 12, color: AppTheme.textSecondary),
-              textAlign: TextAlign.center,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ],
+          const SizedBox(height: 8),
+          Text(
+            'Scan QR with sender, or enter room code above',
+            style: TextStyle(fontSize: 11, color: AppTheme.textSecondaryOf(context)),
+            textAlign: TextAlign.center,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
         ],
+      ),
+    );
+  }
+
+  void _showEnlargedQrDialog(BuildContext context) {
+    if (_unifiedQrPayload == null) return;
+    showDialog(
+      context: context,
+      builder: (ctx) => Dialog(
+        backgroundColor: AppTheme.bgCardOf(context),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(20),
+          side: const BorderSide(color: AppTheme.accentPrimary),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    'Scan to Connect',
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      color: AppTheme.textPrimaryOf(context),
+                    ),
+                  ),
+                  IconButton(
+                    icon: Icon(Icons.close, size: 20, color: AppTheme.textSecondaryOf(context)),
+                    onPressed: () => Navigator.of(ctx).pop(),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(16),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.3),
+                      blurRadius: 12,
+                      offset: const Offset(0, 4),
+                    ),
+                  ],
+                ),
+                child: QrImageView(
+                  data: _unifiedQrPayload!,
+                  version: QrVersions.auto,
+                  size: 220,
+                  backgroundColor: Colors.white,
+                  padding: const EdgeInsets.all(6),
+                  eyeStyle: const QrEyeStyle(
+                    eyeShape: QrEyeShape.square,
+                    color: Colors.black,
+                  ),
+                  dataModuleStyle: const QrDataModuleStyle(
+                    dataModuleShape: QrDataModuleShape.square,
+                    color: Colors.black,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+              Text(
+                'Room: $_roomCode${_pin != null ? ' • PIN: $_pin' : ''}',
+                style: const TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: AppTheme.accentPrimary,
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -897,48 +964,25 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Row(
-              children: [
-                Expanded(
-                  child: _ModeChip(
-                    icon: Icons.wifi,
-                    label: 'Local Network',
-                    selected: _mode == TransferMode.local,
-                    onTap: () => _switchMode(TransferMode.local),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: _ModeChip(
-                    icon: Icons.public,
-                    label: 'Internet',
-                    selected: _mode == TransferMode.internet,
-                    onTap: () => _switchMode(TransferMode.internet),
-                  ),
-                ),
-              ],
-            ),
             Expanded(
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   GestureDetector(
-                    onTap: _mode == TransferMode.local
-                        ? (_isListening ? null : _startLocalReceiver)
-                        : (_remoteStarted ? null : _setupRemoteReceiver),
+                    onTap: _isListening ? null : _startUnifiedReceiver,
                     child: AnimatedRadar(
-                      isListening: _mode == TransferMode.local ? _isListening : _remoteStarted,
+                      isListening: _isListening,
                     ),
                   ),
                   const SizedBox(height: 16),
                   Text(
                     _statusMessage,
-                    style: const TextStyle(fontSize: 15, color: AppTheme.textSecondary),
+                    style: TextStyle(fontSize: 15, color: AppTheme.textSecondaryOf(context)),
                     textAlign: TextAlign.center,
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                   ),
-                  if (_isListening || _remoteStarted)
+                  if (_isListening)
                     TextButton.icon(
                       onPressed: _stopReceiving,
                       style: TextButton.styleFrom(
@@ -954,11 +998,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                       child: ElevatedButton.icon(
                         onPressed: () {
                           _stopReceiving();
-                          if (_mode == TransferMode.local) {
-                            _startLocalReceiver();
-                          } else {
-                            _setupRemoteReceiver();
-                          }
+                          _startUnifiedReceiver();
                         },
                         icon: const Icon(Icons.refresh),
                         label: const Text('Retry'),
@@ -967,33 +1007,15 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                 ],
               ),
             ),
-            if (_mode == TransferMode.local && _pin != null)
-              _buildCodeCard(
-                caption: _requirePinActive
-                    ? 'PIN required senders must enter this code'
-                    : 'Pairing code - senders can use this to find you',
-                code: _pin!,
-                copied: _copied,
-                onCopy: _copyPin,
-
-              ),
-            if (_mode == TransferMode.internet && _roomCode != null)
-              _buildCodeCard(
-                caption: 'Room Code',
-                code: _roomCode!,
-                copied: _roomCodeCopied,
-                onCopy: _copyRoomCode,
-                // ignore: deprecated_member_use
-                onShare: () => Share.share('Use this code to send files on Plenum: $_roomCode'),
-                footer: 'Code valid while this screen is open',
-              ),
+            if (_isListening && _roomCode != null)
+              _buildUnifiedCard(),
             if (_progress != null) ...[
               const SizedBox(height: 8),
               Container(
                 width: double.infinity,
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
-                  color: AppTheme.bgSidebar,
+                  color: AppTheme.bgSidebarOf(context),
                   borderRadius: BorderRadius.circular(12),
                 ),
                 child: Column(
@@ -1004,7 +1026,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                       child: LinearProgressIndicator(
                         value: _progress,
                         minHeight: 8,
-                        backgroundColor: AppTheme.bgApp,
+                        backgroundColor: AppTheme.bgAppOf(context),
                         valueColor: const AlwaysStoppedAnimation<Color>(AppTheme.accentPrimary),
                       ),
                     ),
@@ -1013,14 +1035,14 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                       children: [
                         Text(
                           '${(_progress! * 100).toStringAsFixed(1)}%  •  ${formatBytes(_transferredBytes ?? 0)} / ${formatBytes(_totalBytes ?? 0)}',
-                          style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+                          style: TextStyle(color: AppTheme.textSecondaryOf(context), fontSize: 12),
                         ),
                         if (_speedText != null && _etaText != null) ...[
                           const Spacer(),
                           Flexible(
                             child: Text(
                               '$_speedText • $_etaText',
-                              style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+                              style: TextStyle(color: AppTheme.textSecondaryOf(context), fontSize: 12),
                               overflow: TextOverflow.ellipsis,
                               textAlign: TextAlign.end,
                             ),
@@ -1035,30 +1057,30 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                       Container(
                         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                         decoration: BoxDecoration(
-                          color: AppTheme.bgCard,
+                          color: AppTheme.bgCardOf(context),
                           borderRadius: BorderRadius.circular(8),
-                          border: Border.all(color: AppTheme.borderColor),
+                          border: Border.all(color: AppTheme.borderColorOf(context)),
                         ),
                         child: Column(
                           children: [
                             if (_completedPeerName != null) ...[
                               Row(
                                 children: [
-                                  const Icon(Icons.monitor, size: 16, color: AppTheme.textSecondary),
+                                  Icon(Icons.monitor, size: 16, color: AppTheme.textSecondaryOf(context)),
                                   const SizedBox(width: 8),
-                                  Expanded(child: Text(_completedPeerName!, style: const TextStyle(color: AppTheme.textSecondary, fontSize: 13))),
+                                  Expanded(child: Text(_completedPeerName!, style: TextStyle(color: AppTheme.textSecondaryOf(context), fontSize: 13))),
                                 ],
                               ),
                               const SizedBox(height: 8),
                             ],
                             Row(
                               children: [
-                                const Icon(Icons.timer_outlined, size: 16, color: AppTheme.textSecondary),
+                                Icon(Icons.timer_outlined, size: 16, color: AppTheme.textSecondaryOf(context)),
                                 const SizedBox(width: 8),
                                 Expanded(
                                   child: Text(
                                     '${_completedDuration ?? "-"} • ${_completedMode ?? "Unknown"}',
-                                    style: const TextStyle(color: AppTheme.textSecondary, fontSize: 13),
+                                    style: TextStyle(color: AppTheme.textSecondaryOf(context), fontSize: 13),
                                   ),
                                 ),
                               ],
@@ -1077,7 +1099,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                         ),
                         child: Text(
                           _savedLocation != null ? 'Saved to $_savedLocation' : 'Saving to Downloads...',
-                          style: const TextStyle(color: AppTheme.textPrimary, fontSize: 12, fontWeight: FontWeight.w600),
+                          style: TextStyle(color: AppTheme.textPrimaryOf(context), fontSize: 12, fontWeight: FontWeight.w600),
                           textAlign: TextAlign.center,
                           maxLines: 2,
                           overflow: TextOverflow.ellipsis,
@@ -1121,46 +1143,3 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
   }
 }
 
-class _ModeChip extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final bool selected;
-  final VoidCallback onTap;
-
-  const _ModeChip({required this.icon, required this.label, required this.selected, required this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        width: double.infinity,
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
-        decoration: BoxDecoration(
-          color: AppTheme.bgCard,
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: selected ? AppTheme.accentPrimary : AppTheme.borderColor, width: selected ? 2 : 1),
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(icon, size: 16, color: selected ? AppTheme.accentPrimary : AppTheme.textSecondary),
-            const SizedBox(width: 6),
-            Flexible(
-              child: Text(
-                label,
-                style: TextStyle(
-                  color: selected ? AppTheme.accentPrimary : AppTheme.textSecondary,
-                  fontWeight: FontWeight.w600,
-                  fontSize: 12,
-                ),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
