@@ -3,8 +3,8 @@ use std::time::{Duration, Instant};
 use crate::transport::{Transport, TransportResult};
 
 pub struct MultipathTransport {
-    local_path: Box<dyn Transport + Send + Sync>,
-    control_path: Box<dyn Transport + Send + Sync>,
+    local_path: Box<dyn Transport + Send>,
+    control_path: Box<dyn Transport + Send>,
     failover_enabled: bool,
 
     local_active: bool,
@@ -29,8 +29,8 @@ pub struct MultipathTransport {
 
 impl MultipathTransport {
     pub fn new(
-        local_path: Box<dyn Transport + Send + Sync>,
-        control_path: Box<dyn Transport + Send + Sync>,
+        local_path: Box<dyn Transport + Send>,
+        control_path: Box<dyn Transport + Send>,
     ) -> Self {
         Self {
             local_path,

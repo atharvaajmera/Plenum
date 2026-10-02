@@ -14,8 +14,9 @@ use crate::app::error::AppError;
 use crate::app::types::{
     AcceptDecision, BenchmarkEvent, BenchmarkIterationSummary, BenchmarkRequest, BenchmarkSummary,
     ConnectionState, CorePermissions, DiscoverRequest, DiscoveryEvent, DiscoverySummary, EventSink,
-    LogLevel, PermissionKind, PlenumEvent, ReceiveRemoteRequest, ReceiveRequest, SendRemoteRequest,
-    SendRequest, SessionControl, TransferDirection, TransferEvent, TransferMode, TransferSummary,
+    LogLevel, PermissionKind, PlenumEvent, ReceiveRemoteRequest, ReceiveRequest,
+    ReceiveUnifiedRequest, SelectedPath, SendRemoteRequest, SendRequest, SendUnifiedRequest,
+    SessionControl, TransferDirection, TransferEvent, TransferMode, TransferSummary,
 };
 use crate::discovery::{Beacon, PairingToken};
 use crate::flow::{ReceiverWindow, SenderWindow};
@@ -231,6 +232,127 @@ impl PlenumCore {
         )
     }
 
+    pub fn send_file_unified<S: EventSink>(
+        &mut self,
+        request: SendUnifiedRequest,
+        sink: &mut S,
+    ) -> Result<TransferSummary, AppError> {
+        validate_send_unified_request(&request)?;
+        let mut file = File::open(&request.file_path)?;
+        let file_size = file.metadata()?.len();
+        let file_name = request
+            .file_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+
+        let mut lan_connected_transport: Option<(SecureTransport<TcpTransport>, String)> = None;
+
+        // Check for LAN endpoints if available
+        if request.payload.port > 0 && !request.payload.lan_ips.is_empty() {
+            sink.emit(PlenumEvent::Transfer(TransferEvent::StateChanged {
+                direction: TransferDirection::Send,
+                state: ConnectionState::Connecting,
+                peer: None,
+            }));
+
+            for ip in &request.payload.lan_ips {
+                if self.control.is_cancelled() {
+                    return Err(AppError::Cancelled);
+                }
+                let addr_str = format!("{}:{}", ip, request.payload.port);
+                if let Ok(socket_addr) = addr_str.parse::<std::net::SocketAddr>() {
+                    // Fast non-blocking connect probe with 600ms timeout
+                    if let Ok(stream) = std::net::TcpStream::connect_timeout(
+                        &socket_addr,
+                        Duration::from_millis(600),
+                    ) {
+                        let _ = stream.set_nonblocking(false);
+                        if let Ok(tcp) = TcpTransport::from_stream(stream) {
+                            if let Ok(sec) = SecureTransport::connect(
+                                tcp,
+                                request.payload.pin.as_deref().filter(|p| !p.trim().is_empty()),
+                            ) {
+                                lan_connected_transport = Some((sec, addr_str));
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // LAN probe success, transfer over LAN.
+        if let Some((mut transport, peer_addr)) = lan_connected_transport {
+            sink.emit(PlenumEvent::Transfer(TransferEvent::PathSelected {
+                direction: TransferDirection::Send,
+                path: SelectedPath::Local {
+                    address: peer_addr.clone(),
+                },
+                description: format!("Local network direct connection ({})", peer_addr),
+            }));
+            sink.emit(PlenumEvent::Transfer(TransferEvent::StateChanged {
+                direction: TransferDirection::Send,
+                state: ConnectionState::Connected,
+                peer: Some(peer_addr.clone()),
+            }));
+
+            let send_result = run_send_transfer(
+                &mut transport,
+                sink,
+                &mut file,
+                file_size,
+                &file_name,
+                &request.options,
+                Some(peer_addr),
+                &self.control,
+                request.device_name.as_deref(),
+            );
+
+            match send_result {
+                Ok(summary) => return Ok(summary),
+                Err(AppError::Cancelled) => return Err(AppError::Cancelled),
+                Err(e) if !self.control.is_cancelled() && !request.payload.room_code.is_empty() => {
+                    sink.emit(PlenumEvent::Log {
+                        level: LogLevel::Warn,
+                        message: format!(
+                            "Direct LAN connection dropped ({e}); failing over mid-flight to WebRTC room {}",
+                            request.payload.room_code
+                        ),
+                    });
+                    // Rewind file to beginning so WebRTC transfer can negotiate partial resume offset
+                    let _ = file.rewind();
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        // Fallback to Internet (WebRTC) (Relay Server)
+        sink.emit(PlenumEvent::Transfer(TransferEvent::PathSelected {
+            direction: TransferDirection::Send,
+            path: SelectedPath::Internet {
+                room_code: request.payload.room_code.clone(),
+                is_relayed: false,
+            },
+            description: format!("Internet connection via room {}", request.payload.room_code),
+        }));
+
+        let remote_req = SendRemoteRequest {
+            file_path: request.file_path,
+            relay_server_url: request.relay_server_url,
+            session_id: request.payload.room_code,
+            my_peer_id: request.my_peer_id,
+            ice_servers: request.ice_servers,
+            connect_timeout_secs: request.connect_timeout_secs,
+            device_name: request.device_name,
+            permissions: request.permissions,
+            options: request.options,
+        };
+
+        self.send_file_remote(remote_req, sink)
+    }
+
     pub fn receive_file<S: EventSink>(
         &mut self,
         request: ReceiveRequest,
@@ -443,6 +565,292 @@ impl PlenumCore {
             request.auto_accept,
             request.device_name.as_deref(),
         )
+    }
+
+    pub fn receive_file_unified<S: EventSink>(
+        &mut self,
+        mut request: ReceiveUnifiedRequest,
+        sink: &mut S,
+    ) -> Result<TransferSummary, AppError> {
+        validate_receive_unified_request(&request)?;
+        create_dir_all(&request.output_dir)?;
+        let control = self.control.clone();
+        control.reset_decision();
+
+        let listener = TcpListener::bind(format!("0.0.0.0:{}", request.port))?;
+        listener.set_nonblocking(true)?;
+        let actual_port = listener.local_addr()?.port();
+
+        let token = PairingToken::generate();
+        let pin_code = token.code().to_string();
+
+        let broadcast_handle = if request.announce_on_lan {
+            let beacon = Beacon::new();
+            match beacon.broadcast(
+                &token,
+                actual_port,
+                request.device_name.clone(),
+                request.require_pin,
+            ) {
+                Ok(handle) => Some(handle),
+                Err(e) => {
+                    sink.emit(PlenumEvent::Log {
+                        level: LogLevel::Warn,
+                        message: format!("Failed to start LAN discovery beacon: {e}"),
+                    });
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        sink.emit(PlenumEvent::Discovery(DiscoveryEvent::BroadcastStarted {
+            token: pin_code.clone(),
+            port: actual_port,
+        }));
+
+        sink.emit(PlenumEvent::Transfer(TransferEvent::StateChanged {
+            direction: TransferDirection::Receive,
+            state: ConnectionState::Listening,
+            peer: Some(format!("0.0.0.0:{}", actual_port)),
+        }));
+
+        let beacon_cancel = Arc::new(AtomicBool::new(false));
+        let broadcast_thread = if let Some(handle) = broadcast_handle {
+            let flag = beacon_cancel.clone();
+            Some(thread::spawn(move || {
+                while !flag.load(Ordering::Relaxed) {
+                    let _ = handle.send_once();
+                    thread::sleep(handle.interval());
+                }
+            }))
+        } else {
+            None
+        };
+
+        request.options.chunk_size = request.options.chunk_size.min(RTC_MAX_CHUNK_SIZE);
+        ensure_turn_server(
+            &mut request.ice_servers,
+            &request.relay_server_url,
+            &request.my_peer_id,
+            sink,
+        );
+
+        let lan_cancel = Arc::new(AtomicBool::new(false));
+        let rtc_cancel = Arc::new(AtomicBool::new(false));
+
+        enum IncomingUnified {
+            Local(Box<dyn Transport + Send>, String),
+            Internet(Box<dyn Transport + Send>, String),
+        }
+
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        // Spawn LAN acceptor
+        let tx_lan = tx.clone();
+        let lan_cancel_clone = lan_cancel.clone();
+        let control_cancel_lan = control.cancel_flag();
+        let require_pin = request.require_pin;
+        let expected_pin = pin_code.clone();
+
+        let lan_thread = thread::spawn(move || {
+            while !lan_cancel_clone.load(Ordering::Relaxed) && !control_cancel_lan.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((stream, addr)) => {
+                        let _ = stream.set_nonblocking(false);
+                        let peer_str = addr.to_string();
+                        if let Ok(tcp) = TcpTransport::from_stream(stream) {
+                            if let Ok(sec) = SecureTransport::accept(
+                                tcp,
+                                require_pin.then_some(expected_pin.as_str()),
+                            ) {
+                                let _ = tx_lan.send(IncomingUnified::Local(Box::new(sec), peer_str));
+                                break;
+                            }
+                        }
+                    }
+                    Err(ref e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {
+                        thread::sleep(Duration::from_millis(25));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        // Spawn WebRTC answerer
+        let tx_rtc = tx;
+        let rtc_cancel_clone = rtc_cancel.clone();
+        let control_cancel_rtc = control.cancel_flag();
+        let relay_url = request.relay_server_url.clone();
+        let session_id = request.session_id.clone();
+        let my_peer_id = request.my_peer_id.clone();
+        let ice_servers = request.ice_servers.clone();
+        let connect_timeout = Duration::from_secs(request.connect_timeout_secs);
+
+        let rtc_thread = thread::spawn(move || {
+            let combined_cancel = Arc::new(AtomicBool::new(false));
+            let cc = combined_cancel.clone();
+            let rc = rtc_cancel_clone.clone();
+            let ctrl = control_cancel_rtc.clone();
+
+            let watcher = thread::spawn(move || {
+                while !rc.load(Ordering::Relaxed) && !ctrl.load(Ordering::Relaxed) && !cc.load(Ordering::Relaxed) {
+                    thread::sleep(Duration::from_millis(50));
+                }
+                cc.store(true, Ordering::Relaxed);
+            });
+
+            let outcome = RtcTransport::connect_as_answerer_cancellable(
+                &relay_url,
+                &session_id,
+                &my_peer_id,
+                ice_servers,
+                connect_timeout,
+                false,
+                combined_cancel.clone(),
+            );
+            combined_cancel.store(true, Ordering::Relaxed);
+            let _ = watcher.join();
+
+            if let Ok(transport) = outcome {
+                let _ = tx_rtc.send(IncomingUnified::Internet(Box::new(transport), session_id));
+            }
+        });
+
+        // Main thread waits for whichever transport connects first
+        let incoming = loop {
+            if control.is_cancelled() {
+                lan_cancel.store(true, Ordering::Relaxed);
+                rtc_cancel.store(true, Ordering::Relaxed);
+                beacon_cancel.store(true, Ordering::Relaxed);
+                let _ = lan_thread.join();
+                let _ = rtc_thread.join();
+                if let Some(thread) = broadcast_thread {
+                    let _ = thread.join();
+                }
+                sink.emit(PlenumEvent::Transfer(TransferEvent::Cancelled {
+                    direction: TransferDirection::Receive,
+                }));
+                return Err(AppError::Cancelled);
+            }
+
+            match rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(conn) => break conn,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    lan_cancel.store(true, Ordering::Relaxed);
+                    rtc_cancel.store(true, Ordering::Relaxed);
+                    beacon_cancel.store(true, Ordering::Relaxed);
+                    let _ = lan_thread.join();
+                    let _ = rtc_thread.join();
+                    if let Some(thread) = broadcast_thread {
+                        let _ = thread.join();
+                    }
+                    return Err(AppError::Io(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionAborted,
+                        "All connection listeners terminated without connection",
+                    )));
+                }
+            }
+        };
+
+        // Disarm and clean up the inactive path and discovery beacon
+        lan_cancel.store(true, Ordering::Relaxed);
+        rtc_cancel.store(true, Ordering::Relaxed);
+        beacon_cancel.store(true, Ordering::Relaxed);
+        let _ = lan_thread.join();
+        let _ = rtc_thread.join();
+        if let Some(thread) = broadcast_thread {
+            let _ = thread.join();
+        }
+
+        match incoming {
+            IncomingUnified::Local(mut transport, peer) => {
+                sink.emit(PlenumEvent::Transfer(TransferEvent::PathSelected {
+                    direction: TransferDirection::Receive,
+                    path: SelectedPath::Local { address: peer.clone() },
+                    description: format!("Local network direct connection ({})", peer),
+                }));
+                sink.emit(PlenumEvent::Transfer(TransferEvent::StateChanged {
+                    direction: TransferDirection::Receive,
+                    state: ConnectionState::Connected,
+                    peer: Some(peer.clone()),
+                }));
+                let res = run_receive_transfer(
+                    &mut transport,
+                    sink,
+                    &request.output_dir,
+                    &request.options,
+                    peer,
+                    &control,
+                    request.auto_accept,
+                    request.device_name.as_deref(),
+                );
+
+                match res {
+                    Ok(summary) => Ok(summary),
+                    Err(AppError::Cancelled) => Err(AppError::Cancelled),
+                    Err(e) if !control.is_cancelled() => {
+                        sink.emit(PlenumEvent::Log {
+                            level: LogLevel::Warn,
+                            message: format!(
+                                "Local direct connection interrupted ({e}); falling back to WebRTC room {}",
+                                request.session_id
+                            ),
+                        });
+                        sink.emit(PlenumEvent::Transfer(TransferEvent::PathSelected {
+                            direction: TransferDirection::Receive,
+                            path: SelectedPath::Internet {
+                                room_code: request.session_id.clone(),
+                                is_relayed: false,
+                            },
+                            description: format!("Failing over to Internet via room {}", request.session_id),
+                        }));
+                        let remote_req = ReceiveRemoteRequest {
+                            output_dir: request.output_dir,
+                            relay_server_url: request.relay_server_url,
+                            session_id: request.session_id,
+                            my_peer_id: request.my_peer_id,
+                            ice_servers: request.ice_servers,
+                            connect_timeout_secs: request.connect_timeout_secs,
+                            auto_accept: true,
+                            device_name: request.device_name,
+                            permissions: request.permissions,
+                            options: request.options,
+                        };
+                        self.receive_file_remote(remote_req, sink)
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            IncomingUnified::Internet(mut transport, room) => {
+                let relayed = transport.is_relayed().unwrap_or(false);
+                sink.emit(PlenumEvent::Transfer(TransferEvent::PathSelected {
+                    direction: TransferDirection::Receive,
+                    path: SelectedPath::Internet {
+                        room_code: room.clone(),
+                        is_relayed: relayed,
+                    },
+                    description: format!("Internet connection via room {}", room),
+                }));
+                sink.emit(PlenumEvent::Transfer(TransferEvent::StateChanged {
+                    direction: TransferDirection::Receive,
+                    state: ConnectionState::Connected,
+                    peer: Some(room.clone()),
+                }));
+                run_receive_transfer(
+                    &mut transport,
+                    sink,
+                    &request.output_dir,
+                    &request.options,
+                    room,
+                    &control,
+                    request.auto_accept,
+                    request.device_name.as_deref(),
+                )
+            }
+        }
     }
 
     pub fn discover_peer<S: EventSink>(
@@ -690,6 +1098,43 @@ fn validate_receive_remote_request(request: &ReceiveRemoteRequest) -> Result<(),
         PermissionKind::FileSystemWrite,
         "receive_file_remote",
     )?;
+    validate_remote_request_fields(
+        &request.relay_server_url,
+        &request.session_id,
+        request.connect_timeout_secs,
+    )?;
+    validate_transfer_options(&request.options)?;
+    Ok(())
+}
+
+fn validate_send_unified_request(request: &SendUnifiedRequest) -> Result<(), AppError> {
+    require_permission(
+        &request.permissions,
+        PermissionKind::FileSystemRead,
+        "send_file_unified",
+    )?;
+    validate_remote_request_fields(
+        &request.relay_server_url,
+        &request.payload.room_code,
+        request.connect_timeout_secs,
+    )?;
+    validate_transfer_options(&request.options)?;
+    Ok(())
+}
+
+fn validate_receive_unified_request(request: &ReceiveUnifiedRequest) -> Result<(), AppError> {
+    require_permission(
+        &request.permissions,
+        PermissionKind::FileSystemWrite,
+        "receive_file_unified",
+    )?;
+    if request.announce_on_lan {
+        require_permission(
+            &request.permissions,
+            PermissionKind::LocalNetwork,
+            "receive_file_unified",
+        )?;
+    }
     validate_remote_request_fields(
         &request.relay_server_url,
         &request.session_id,
@@ -1275,6 +1720,7 @@ fn run_streaming_send_loop<T: Transport, S: EventSink>(
     let chunk_size = options.chunk_size;
     let configured_window = (chunk_size as u64).saturating_mul(options.window_size as u64);
     let max_in_flight = configured_window
+        .max(STREAM_ACK_INTERVAL_BYTES)
         .min(STREAM_MAX_IN_FLIGHT_BYTES)
         .max(chunk_size as u64);
     let mut buffer = vec![0u8; chunk_size];
@@ -1503,6 +1949,8 @@ fn run_streaming_send_loop<T: Transport, S: EventSink>(
 
         if file_done {
             if bytes_acked >= file_size {
+                thread::sleep(Duration::from_millis(50));
+                let _ = transport.recv();
                 break;
             }
             if last_finish_sent.elapsed() >= FINISH_RETRY_INTERVAL {
@@ -1601,6 +2049,8 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
     // guarantees happens before the first Data packet of the transfer.
     let mut stream_offered = false;
     let mut streaming = false;
+    let stream_ack_interval = STREAM_ACK_INTERVAL_BYTES
+        .min(((options.chunk_size as u64).saturating_mul(options.window_size as u64) / 2).max(options.chunk_size as u64));
     let mut bytes_since_stream_ack = 0u64;
     let mut finish_received = false;
 
@@ -1944,14 +2394,21 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
                     // far (next_expected - 1 is the last contiguous packet).
                     if streaming {
                         bytes_since_stream_ack = bytes_since_stream_ack.saturating_add(batch_bytes);
-                        if bytes_since_stream_ack >= STREAM_ACK_INTERVAL_BYTES {
+                        if bytes_since_stream_ack >= stream_ack_interval {
                             bytes_since_stream_ack = 0;
                             diag_acks_sent = diag_acks_sent.saturating_add(1);
-                            receive_send!(Packet::new(
+                            let ack_packet = Packet::new(
                                 PacketType::Ack,
                                 receiver.next_expected().saturating_sub(1),
                                 Vec::new(),
-                            ));
+                            );
+                            if let Ok(bytes) = encode_packet(&ack_packet) {
+                                if let Err(e) = transport.send(&bytes) {
+                                    if bytes_received < file_size {
+                                        receive_try!(Err(e));
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -2009,11 +2466,13 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
                 // cumulative ACK here.
                 if streaming && receiver.next_expected() > 0 {
                     diag_acks_sent = diag_acks_sent.saturating_add(1);
-                    receive_send!(Packet::new(
+                    if let Ok(bytes) = encode_packet(&Packet::new(
                         PacketType::Ack,
                         receiver.next_expected() - 1,
                         Vec::new(),
-                    ));
+                    )) {
+                        let _ = transport.send(&bytes);
+                    }
                 }
                 if progress_dirty {
                     sink.emit(PlenumEvent::Transfer(TransferEvent::Progress {

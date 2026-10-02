@@ -153,6 +153,9 @@ impl plenum::app::EventSink for CliEventSink {
                         }
                     }
                 },
+                TransferEvent::PathSelected { description, .. } => {
+                    self.println(format!("Path selected: {description}"));
+                }
                 TransferEvent::Started {
                     direction,
                     file_name,

@@ -33,3 +33,30 @@ pub trait Transport {
         None
     }
 }
+
+impl<T: ?Sized + Transport> Transport for Box<T> {
+    fn send(&mut self, bytes: &[u8]) -> TransportResult<()> {
+        (**self).send(bytes)
+    }
+
+    fn recv(&mut self) -> TransportResult<Option<Vec<u8>>> {
+        (**self).recv()
+    }
+
+    fn close(&mut self) -> TransportResult<()> {
+        (**self).close()
+    }
+
+    fn is_closed(&self) -> bool {
+        (**self).is_closed()
+    }
+
+    fn poll_diagnostics(&mut self) -> Vec<String> {
+        (**self).poll_diagnostics()
+    }
+
+    fn is_relayed(&self) -> Option<bool> {
+        (**self).is_relayed()
+    }
+}
+

@@ -14,6 +14,9 @@ pub use error::AppError;
 pub use types::{
     AcceptDecision, BenchmarkEvent, BenchmarkIterationSummary, BenchmarkRequest, BenchmarkSummary,
     ConnectionState, CorePermissions, DiscoverRequest, DiscoveryEvent, DiscoverySummary, EventSink,
-    LogLevel, PermissionKind, PlenumEvent, ReceiveRequest, SendRequest, SessionControl,
-    TransferDirection, TransferEvent, TransferMode, TransferOptions, TransferSummary,
+    LogLevel, PermissionKind, PlenumEvent, ReceiveRemoteRequest, ReceiveRequest,
+    ReceiveUnifiedRequest, SelectedPath, SendRemoteRequest, SendRequest, SendUnifiedRequest,
+    SessionControl, TransferDirection, TransferEvent, TransferMode, TransferOptions,
+    TransferSummary, UnifiedSharePayload, generate_peer_id, generate_room_code,
+    get_local_ip_addresses,
 };
