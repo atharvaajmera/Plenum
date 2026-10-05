@@ -72,17 +72,6 @@ class QrPayload {
     return payload.toUri();
   }
 
-  /// Encodes an internet room code to a QR URI.
-  static String encodeRoom(String code) {
-    final trimmed = code.trim().toUpperCase();
-    return 'plenum://room/${Uri.encodeComponent(trimmed)}';
-  }
-
-  /// Encodes a LAN PIN to a QR URI.
-  static String encodePin(String pin) {
-    final trimmed = pin.trim();
-    return 'plenum://pin/${Uri.encodeComponent(trimmed)}';
-  }
 
   /// Parses a raw scanned string into a [QrPayload].
   /// Returns `null` if the string is empty or invalid.

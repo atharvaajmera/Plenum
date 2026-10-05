@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `register_session`, `sessions`, `unregister_session`
+// These functions are ignored because they are not marked as `pub`: `parse_target_paths`, `register_session`, `sessions`, `unregister_session`
 
 /// Requests cancellation of the transfer running under `session_token`.
 /// The blocking transfer loop notices the flag within tens of milliseconds,
@@ -23,97 +23,6 @@ void respondToIncoming({required String sessionToken, required bool accept}) =>
     );
 
 void initApp() => RustLib.instance.api.crateApiPlenumApiInitApp();
-
-Stream<String> startDiscovery({required BigInt timeoutSecs}) => RustLib
-    .instance
-    .api
-    .crateApiPlenumApiStartDiscovery(timeoutSecs: timeoutSecs);
-
-Stream<String> startSend({
-  required String sessionToken,
-  required String filePath,
-  required String peerAddress,
-  String? optionalPin,
-  String? deviceName,
-}) => RustLib.instance.api.crateApiPlenumApiStartSend(
-  sessionToken: sessionToken,
-  filePath: filePath,
-  peerAddress: peerAddress,
-  optionalPin: optionalPin,
-  deviceName: deviceName,
-);
-
-Stream<String> startReceive({
-  required String sessionToken,
-  required String outputDir,
-  required int port,
-  required bool announce,
-  String? deviceName,
-  required bool requirePin,
-  required bool autoAccept,
-}) => RustLib.instance.api.crateApiPlenumApiStartReceive(
-  sessionToken: sessionToken,
-  outputDir: outputDir,
-  port: port,
-  announce: announce,
-  deviceName: deviceName,
-  requirePin: requirePin,
-  autoAccept: autoAccept,
-);
-
-/// Sends a file over the internet via a relay/signaling server, negotiating a
-/// WebRTC data channel. Mirrors `start_send`, but for internet (non-LAN) transfers.
-///
-/// `ice_servers_json` is a JSON-encoded array of `{ urls: string[], username?:
-/// string, credential?: string }`, matching `plenum::signaling::IceServer`.
-/// Passed as JSON (rather than a plain FFI struct) because `IceServer` is
-/// defined in the `plenum` crate, so flutter_rust_bridge would otherwise
-/// generate it as an opaque handle Dart cannot construct field-by-field.
-Stream<String> startSendRemote({
-  required String sessionToken,
-  required String filePath,
-  required String relayServerUrl,
-  required String sessionId,
-  required String myPeerId,
-  required String iceServersJson,
-  required BigInt connectTimeoutSecs,
-  String? deviceName,
-}) => RustLib.instance.api.crateApiPlenumApiStartSendRemote(
-  sessionToken: sessionToken,
-  filePath: filePath,
-  relayServerUrl: relayServerUrl,
-  sessionId: sessionId,
-  myPeerId: myPeerId,
-  iceServersJson: iceServersJson,
-  connectTimeoutSecs: connectTimeoutSecs,
-  deviceName: deviceName,
-);
-
-/// Receives a file over the internet via a relay/signaling server, negotiating
-/// a WebRTC data channel. Mirrors `start_receive`, but for internet (non-LAN) transfers.
-///
-/// See [`start_send_remote`] for the `ice_servers_json` shape/rationale.
-Stream<String> startReceiveRemote({
-  required String sessionToken,
-  required String outputDir,
-  required String relayServerUrl,
-  required String sessionId,
-  required String myPeerId,
-  required String iceServersJson,
-  required BigInt connectTimeoutSecs,
-  required bool autoAccept,
-  String? deviceName,
-}) => RustLib.instance.api.crateApiPlenumApiStartReceiveRemote(
-  sessionToken: sessionToken,
-  outputDir: outputDir,
-  relayServerUrl: relayServerUrl,
-  sessionId: sessionId,
-  myPeerId: myPeerId,
-  iceServersJson: iceServersJson,
-  connectTimeoutSecs: connectTimeoutSecs,
-  autoAccept: autoAccept,
-  deviceName: deviceName,
-);
 
 /// Generates a display-ready room code for internet transfers, without
 /// blocking on a relay-server connection (so the receive UI can show it

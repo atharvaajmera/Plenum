@@ -1,9 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
-import 'package:permission_handler/permission_handler.dart';
 import 'package:mobile/src/rust/api/plenum_api.dart';
 import '../services/internet_settings.dart';
 import '../theme.dart';
@@ -19,6 +19,20 @@ import '../widgets/qr_scanner_sheet.dart';
 import '../utils/qr_payload.dart';
 import 'settings_screen.dart';
 
+class SelectedTransferItem {
+  final String path;
+  final String name;
+  final int size;
+  final bool isDirectory;
+
+  const SelectedTransferItem({
+    required this.path,
+    required this.name,
+    required this.size,
+    required this.isDirectory,
+  });
+}
+
 class SendScreen extends StatefulWidget {
   const SendScreen({super.key});
 
@@ -29,13 +43,28 @@ class SendScreen extends StatefulWidget {
 class _SendScreenState extends State<SendScreen> {
   TransferUiPhase _phase = TransferUiPhase.idle;
   bool _terminalEventReceived = false;
-  String? _selectedFile;
-  final List<Map<String, dynamic>> _peers = [];
-  bool _isDiscovering = false;
+  final List<SelectedTransferItem> _selectedItems = [];
+
+  String? get _selectedFile {
+    if (_selectedItems.isEmpty) return null;
+    if (_selectedItems.length == 1) return _selectedItems.first.path;
+    return jsonEncode(_selectedItems.map((e) => e.path).toList());
+  }
+
+  int? get _selectedFileSize {
+    if (_selectedItems.isEmpty) return null;
+    return _selectedItems.fold<int>(0, (sum, item) => sum + item.size);
+  }
+
+  String get _displayNameForSelectedItems {
+    if (_selectedItems.isEmpty) return 'Unknown file';
+    if (_selectedItems.length == 1) return _selectedItems.first.name;
+    return '${_selectedItems.first.name} + ${_selectedItems.length - 1} more';
+  }
+
   String _transferStatus = '';
   String? _currentTransferPeerName;
   double? _progress;
-  int? _selectedFileSize;
 
   int? _totalBytes;
   int? _transferredBytes;
@@ -50,7 +79,6 @@ class _SendScreenState extends State<SendScreen> {
   /// Ownership token for the currently-held [TransferLock], if any.
   Object? _lockToken;
   StreamSubscription<String>? _transferSub;
-  StreamSubscription<String>? _discoverySub;
   bool _transferActive = false;
   bool _showSuccess = false;
   Timer? _autoResetTimer;
@@ -62,12 +90,6 @@ class _SendScreenState extends State<SendScreen> {
   String? _activePathBadge;
 
   @override
-  void initState() {
-    super.initState();
-    _startDiscovery();
-  }
-
-  @override
   void dispose() {
     final token = _sessionToken;
     if (token != null && !_transferActive) {
@@ -76,7 +98,6 @@ class _SendScreenState extends State<SendScreen> {
       } catch (_) {}
     }
     if (!_transferActive) _transferSub?.cancel();
-    _discoverySub?.cancel();
     _autoResetTimer?.cancel();
     _roomCodeController.dispose();
     if (!_transferActive) {
@@ -144,85 +165,87 @@ class _SendScreenState extends State<SendScreen> {
     if (!mounted) return;
 
     setState(() {
-      _selectedFile = null;
-      _selectedFileSize = null;
+      _selectedItems.clear();
     });
   }
 
-  void _startDiscovery() async {
-    _discoverySub?.cancel();
-    _discoverySub = null;
 
-    await Permission.nearbyWifiDevices.request();
-    if (!mounted) return;
-
-    setState(() {
-      _peers.clear();
-      _transferStatus = '';
-      _progress = null;
-      if (!_phase.isTerminal && _phase != TransferUiPhase.transferring && _phase != TransferUiPhase.connecting) {
-        _phase = TransferUiPhase.discovering;
+  Future<void> _pickFiles() async {
+    try {
+      if (!_transferActive && _selectedItems.isEmpty) {
+        await FilePicker.clearTemporaryFiles();
       }
-    });
-
-    _discoverySub = startDiscovery(timeoutSecs: BigInt.from(10)).listen((eventJson) {
-      if (!mounted) return;
-      final event = jsonDecode(eventJson);
-      if (event['Discovery'] != null) {
-        final discEvent = event['Discovery'];
-        if (discEvent == 'PeerNotFound') {
-          setState(() {
-            _isDiscovering = false;
-            if (_phase == TransferUiPhase.discovering) {
-              _phase = TransferUiPhase.idle;
-            }
-            _transferStatus = 'No devices found';
-          });
-        } else if (discEvent is Map) {
-          if (discEvent['PeerFound'] != null) {
-            setState(() {
-              final found = discEvent['PeerFound'];
-              final token = found['token'];
-              final duplicate = _peers.any((p) =>
-                  p['address'] == found['address'] ||
-                  (token != null && token.toString().isNotEmpty && p['token'] == token));
-              if (!duplicate) {
-                _peers.add(found);
-              }
-            });
-          } else if (discEvent['SearchStarted'] != null) {
-            setState(() {
-              _isDiscovering = true;
-              if (!_phase.isTerminal && _phase != TransferUiPhase.transferring && _phase != TransferUiPhase.connecting) {
-                _phase = TransferUiPhase.discovering;
-              }
-            });
-          }
-        }
-      }
-    }, onDone: () {
-      if (mounted) {
+      final result = await FilePicker.pickFiles(allowMultiple: true);
+      if (result != null && result.files.isNotEmpty) {
         setState(() {
-          _isDiscovering = false;
-          if (_phase == TransferUiPhase.discovering) {
-            _phase = TransferUiPhase.idle;
+          for (final f in result.files) {
+            if (f.path != null && !_selectedItems.any((item) => item.path == f.path)) {
+              _selectedItems.add(SelectedTransferItem(
+                path: f.path!,
+                name: f.name,
+                size: f.size,
+                isDirectory: false,
+              ));
+            }
           }
         });
       }
-    });
+    } catch (e) {
+      debugPrint('Failed to pick files: $e');
+    }
   }
 
-  Future<void> _pickFile() async {
-    if (!_transferActive) {
-      await FilePicker.clearTemporaryFiles();
+  Future<void> _pickFolder() async {
+    try {
+      final folderPath = await FilePicker.getDirectoryPath();
+      if (folderPath != null && folderPath.isNotEmpty) {
+        if (!_selectedItems.any((item) => item.path == folderPath)) {
+          final dirName = folderPath.split(RegExp(r'[\\/]')).where((s) => s.isNotEmpty).lastOrNull ?? folderPath;
+          final size = _computeDirectorySize(folderPath);
+          setState(() {
+            _selectedItems.add(SelectedTransferItem(
+              path: folderPath,
+              name: dirName,
+              size: size,
+              isDirectory: true,
+            ));
+          });
+        }
+      }
+    } catch (e) {
+      debugPrint('Failed to pick folder: $e');
     }
-    FilePickerResult? result = await FilePicker.pickFiles();
-    if (result != null) {
-      setState(() {
-        _selectedFile = result.files.single.path;
-        _selectedFileSize = result.files.single.size;
-      });
+  }
+
+  int _computeDirectorySize(String dirPath) {
+    try {
+      final dir = Directory(dirPath);
+      int total = 0;
+      for (final entity in dir.listSync(recursive: true, followLinks: false)) {
+        if (entity is File) {
+          total += entity.lengthSync();
+        }
+      }
+      return total;
+    } catch (_) {
+      return 0;
     }
+  }
+
+  void _removeItem(int index) {
+    setState(() {
+      _selectedItems.removeAt(index);
+    });
+    if (_selectedItems.isEmpty) {
+      unawaited(FilePicker.clearTemporaryFiles());
+    }
+  }
+
+  void _clearAllItems() {
+    setState(() {
+      _selectedItems.clear();
+    });
+    unawaited(FilePicker.clearTemporaryFiles());
   }
 
   void _handleTransferEvent(String eventJson) {
@@ -237,6 +260,20 @@ class _SendScreenState extends State<SendScreen> {
     }
     if (event['Transfer'] != null) {
       final trans = event['Transfer'];
+      if (trans['Packaging'] != null) {
+        if (_terminalEventReceived) return;
+        final pkg = trans['Packaging'];
+        final current = pkg['current_item'] ?? 0;
+        final total = pkg['total_items'] ?? 0;
+        final name = pkg['current_name'] ?? '';
+        setState(() {
+          _phase = TransferUiPhase.connecting;
+          _transferStatus = total > 0
+              ? 'Archiving items ($current/$total): $name'
+              : 'Preparing archive...';
+        });
+        return;
+      }
       if (trans['PathSelected'] != null) {
         final path = trans['PathSelected']['path'];
         setState(() {
@@ -387,7 +424,7 @@ class _SendScreenState extends State<SendScreen> {
         final sessionBytes = max(0, totalBytes - resumedBytes);
         settings.addTransferHistory({
           'direction': 'send',
-          'fileName': summary['file_name'] ?? _selectedFile?.split(RegExp(r'[\\/]')).last ?? 'Unknown file',
+          'fileName': summary['file_name'] ?? _displayNameForSelectedItems,
           'size': totalBytes,
           'resumedBytes': resumedBytes,
           'sessionBytes': sessionBytes,
@@ -408,7 +445,7 @@ class _SendScreenState extends State<SendScreen> {
           _showSuccess = true;
           _isConnectingRemote = false;
           _transferActive = false;
-          _completedFileName = summary['file_name'] ?? _selectedFile?.split(RegExp(r'[\\/]')).last ?? 'Unknown file';
+          _completedFileName = summary['file_name'] ?? _displayNameForSelectedItems;
           _completedPeerName = peerName;
           _completedDuration = elapsedMs != null ? formatDuration(elapsedMs) : null;
           _completedMode = mode;
@@ -422,77 +459,6 @@ class _SendScreenState extends State<SendScreen> {
     }
   }
 
-  Future<void> _sendToPeer(String address, String hostname, String? pin) async {
-    if (_selectedFile == null) return;
-    _currentTransferPeerName = hostname;
-    final deviceName = context.read<SettingsService>().deviceName;
-
-    final sessionToken = DateTime.now().millisecondsSinceEpoch.toString();
-    _sessionToken = sessionToken;
-    _autoResetTimer?.cancel();
-    setState(() {
-      _phase = TransferUiPhase.connecting;
-      _terminalEventReceived = false;
-      _transferActive = true;
-      _showSuccess = false;
-      _transferStatus = 'Connecting to $hostname...';
-    });
-    Object? lockToken;
-    try {
-      lockToken = await TransferLock.acquire();
-      _lockToken = lockToken;
-    } catch (error) {
-      if (mounted) {
-        setState(() {
-          _terminalEventReceived = true;
-          _phase = TransferUiPhase.failed;
-          _transferStatus = 'Transfer lock unavailable';
-          _transferActive = false;
-        });
-      }
-      return;
-    }
-    _transferSub = startSend(
-      filePath: _selectedFile!,
-      peerAddress: address,
-      optionalPin: pin,
-      deviceName: deviceName,
-      sessionToken: sessionToken,
-    ).listen(
-      _handleTransferEvent,
-      onDone: () {
-        TransferLock.release(lockToken);
-        _lockToken = null;
-        if (mounted) {
-          setState(() {
-            _transferActive = false;
-            if (!_terminalEventReceived && !_phase.isTerminal) {
-              _phase = TransferUiPhase.idle;
-            }
-          });
-        }
-        unawaited(_clearSelectedTemporaryFile());
-      },
-      onError: (e) {
-        TransferLock.release(lockToken);
-        _lockToken = null;
-        if (mounted) {
-          if (_terminalEventReceived || _phase.isTerminal) {
-            // The semantic transfer event already updated the UI.
-            return;
-          }
-          setState(() {
-            _transferActive = false;
-            _terminalEventReceived = true;
-            _phase = TransferUiPhase.failed;
-            _transferStatus = friendlyError(e);
-            _progress = null;
-          });
-        }
-        unawaited(_clearSelectedTemporaryFile());
-      },
-    );
-  }
 
   Future<void> _handleUnifiedConnect(QrPayload payload) async {
     if (_selectedFile == null) {
@@ -607,279 +573,242 @@ class _SendScreenState extends State<SendScreen> {
       return;
     }
     final parsed = QrPayload.parse(rawText);
-    if (parsed != null && parsed.type == QrPayloadType.unified) {
+    if (parsed != null && parsed.unifiedPayload != null) {
       return _handleUnifiedConnect(parsed);
     }
-    final roomCode = rawText.toUpperCase();
-    if (!RegExp(r'^[A-Z0-9]{9}$').hasMatch(roomCode)) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Room codes are 9 letters or numbers')));
-      return;
-    }
-    if (_isConnectingRemote || _phase == TransferUiPhase.connecting || _phase == TransferUiPhase.transferring) return;
-
-    final settings = context.read<SettingsService>();
-    final relayServerUrl = settings.relayServerUrl;
-    final iceServers = settings.iceServers
-        .split('\n')
-        .map((e) => e.trim())
-        .where((e) => e.isNotEmpty)
-        .map((e) => IceServerSetting(urls: e))
-        .toList();
-    _currentTransferPeerName = 'Remote Device ($roomCode)';
-
-    setState(() {
-      _phase = TransferUiPhase.connecting;
-      _terminalEventReceived = false;
-      _transferStatus = 'Finding room…';
-      _isConnectingRemote = true;
-    });
-
-    Object? lockToken;
-    try {
-      final lookup = await InternetSettings.lookupRoomWithGracePeriod(
-        relayServerUrl,
-        roomCode,
-        timeout: const Duration(seconds: 4),
-        isCancelled: () => !mounted || _phase.isTerminal,
-      );
-      if (!lookup.exists) {
-        if (mounted) {
-          setState(() {
-            _terminalEventReceived = true;
-            _phase = TransferUiPhase.failed;
-            _transferStatus = lookup.userMessage;
-            _isConnectingRemote = false;
-          });
-        }
-        return;
-      }
-
-      if (mounted) {
-        setState(() {
-          _transferStatus = 'Room found. Connecting…';
-        });
-      }
-
-      final myPeerId = generatePeerIdSync();
-      final iceServersJson = await InternetSettings.buildIceServersJsonWithTurn(
-        relayServerUrl,
-        myPeerId,
-        iceServers,
-      );
-      final sessionToken = DateTime.now().millisecondsSinceEpoch.toString();
-      _sessionToken = sessionToken;
-      _autoResetTimer?.cancel();
-      setState(() {
-        _phase = TransferUiPhase.connecting;
-        _terminalEventReceived = false;
-        _transferActive = true;
-        _showSuccess = false;
-      });
-      lockToken = await TransferLock.acquire();
-      _lockToken = lockToken;
-      _transferSub = startSendRemote(
-        filePath: _selectedFile!,
-        relayServerUrl: relayServerUrl,
-        sessionId: roomCode,
-        myPeerId: myPeerId,
-        iceServersJson: iceServersJson,
-        connectTimeoutSecs: BigInt.from(30),
-        deviceName: settings.deviceName,
-        sessionToken: sessionToken,
-      ).listen(
-        _handleTransferEvent,
-        onDone: () {
-          TransferLock.release(lockToken);
-          _lockToken = null;
-          if (mounted) {
-            setState(() {
-              _isConnectingRemote = false;
-              _transferActive = false;
-              if (!_terminalEventReceived && !_phase.isTerminal) {
-                _phase = TransferUiPhase.idle;
-              }
-            });
-          }
-          unawaited(_clearSelectedTemporaryFile());
-        },
-        onError: (e) {
-          TransferLock.release(lockToken);
-          _lockToken = null;
-          if (mounted) {
-            if (_terminalEventReceived || _phase.isTerminal) {
-              // The semantic transfer event already updated the UI.
-              return;
-            }
-            setState(() {
-              _isConnectingRemote = false;
-              _transferActive = false;
-              _terminalEventReceived = true;
-              _phase = TransferUiPhase.failed;
-              _transferStatus = friendlyError(e);
-              _progress = null;
-            });
-          }
-          unawaited(_clearSelectedTemporaryFile());
-        },
-      );
-    } catch (e) {
-      TransferLock.release(lockToken);
-      if (identical(_lockToken, lockToken)) _lockToken = null;
-      setState(() {
-        _terminalEventReceived = true;
-        _phase = TransferUiPhase.failed;
-        _transferStatus = friendlyError(e);
-        _isConnectingRemote = false;
-        _transferActive = false;
-      });
-    }
-  }
-
-  void _showPinDialog(String address, String hostname, {bool pinRequired = false}) {
-    if (_selectedFile == null) return;
-
-    final TextEditingController pinController = TextEditingController();
-
-    void submit(BuildContext dialogContext) {
-      final pin = pinController.text.trim();
-      if (pinRequired && pin.isEmpty) return; // must enter a code
-      Navigator.pop(dialogContext);
-      unawaited(_sendToPeer(address, hostname, pin.isNotEmpty ? pin : null));
-    }
-
-    showDialog(
-      context: context,
-      builder: (dialogCtx) {
-        return AlertDialog(
-          backgroundColor: AppTheme.bgCardOf(dialogCtx),
-          title: Text('Send to $hostname', style: TextStyle(color: AppTheme.textPrimaryOf(dialogCtx))),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                pinRequired
-                    ? 'This device requires a pairing code. Enter the code shown on its screen or scan its QR code.'
-                    : 'If the receiver requires a pairing code, enter it below or scan its QR code. Otherwise, leave blank.',
-                style: TextStyle(color: AppTheme.textSecondaryOf(dialogCtx), fontSize: 14),
-              ),
-              const SizedBox(height: 16),
-              TextField(
-                controller: pinController,
-                autofocus: true,
-                textCapitalization: TextCapitalization.characters,
-                decoration: InputDecoration(
-                  labelText: pinRequired ? 'Pairing Code' : 'Pairing Code (Optional)',
-                  border: const OutlineInputBorder(),
-                  focusedBorder: const OutlineInputBorder(borderSide: BorderSide(color: AppTheme.accentPrimary)),
-                  suffixIcon: IconButton(
-                    icon: const Icon(Icons.qr_code_scanner, color: AppTheme.accentPrimary),
-                    tooltip: 'Scan PIN QR',
-                    onPressed: () async {
-                      final payload = await QrScannerSheet.show(dialogCtx, title: 'Scan Pairing PIN');
-                      if (payload != null && dialogCtx.mounted) {
-                        pinController.text = payload.code;
-                        submit(dialogCtx);
-                      }
-                    },
-                  ),
-                ),
-                style: TextStyle(color: AppTheme.textPrimaryOf(dialogCtx)),
-                onSubmitted: (_) => submit(dialogCtx),
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(dialogCtx),
-              child: Text('Cancel', style: TextStyle(color: AppTheme.textSecondaryOf(dialogCtx))),
-            ),
-            ElevatedButton(
-              onPressed: () => submit(dialogCtx),
-              style: ElevatedButton.styleFrom(backgroundColor: AppTheme.accentPrimary),
-              child: const Text('Send'),
-            ),
-          ],
-        );
-      },
-    );
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Room codes are 9 letters or numbers')));
   }
 
 
   Widget _buildFilePicker() {
-    if (_selectedFile != null) {
+    if (_selectedItems.isNotEmpty) {
+      final totalSize = _selectedFileSize ?? 0;
+      final isArchive = _selectedItems.length > 1 || _selectedItems.any((i) => i.isDirectory);
+      final badgeText = _selectedItems.length == 1
+          ? (_selectedItems.first.isDirectory ? 'FOLDER (ZIP)' : 'SINGLE FILE')
+          : 'MULTI-FILE BUNDLE (${_selectedItems.length} ITEMS • ZIP)';
+      final badgeColor = isArchive ? const Color(0xFF6366F1) : AppTheme.accentPrimary;
+
       return Container(
         width: double.infinity,
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        padding: const EdgeInsets.all(12),
         decoration: BoxDecoration(
           color: AppTheme.bgCardOf(context),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: AppTheme.accentPrimary),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: badgeColor.withValues(alpha: 0.5)),
         ),
-        child: Row(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const Icon(Icons.insert_drive_file, color: AppTheme.accentPrimary, size: 28),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    _selectedFile!.split(RegExp(r'[\\/]')).last,
-                    style: TextStyle(fontWeight: FontWeight.w600, color: AppTheme.textPrimaryOf(context), fontSize: 14),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+            Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: badgeColor.withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(6),
                   ),
-                  if (_selectedFileSize != null) ...[
-                    const SizedBox(height: 2),
-                    Text(formatBytes(_selectedFileSize!), style: TextStyle(color: AppTheme.textSecondaryOf(context), fontSize: 12)),
-                  ],
-                ],
+                  child: Text(
+                    badgeText,
+                    style: TextStyle(
+                      color: badgeColor,
+                      fontSize: 10.5,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0.5,
+                    ),
+                  ),
+                ),
+                const Spacer(),
+                Text(
+                  formatBytes(totalSize),
+                  style: TextStyle(
+                    color: AppTheme.textSecondaryOf(context),
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(width: 4),
+                IconButton(
+                  visualDensity: VisualDensity.compact,
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                  icon: Icon(Icons.delete_sweep_outlined, size: 18, color: AppTheme.textSecondaryOf(context)),
+                  tooltip: 'Clear all',
+                  onPressed: _clearAllItems,
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 180),
+              child: ListView.separated(
+                shrinkWrap: true,
+                padding: EdgeInsets.zero,
+                itemCount: _selectedItems.length,
+                separatorBuilder: (context, index) => Divider(
+                  color: AppTheme.borderColorOf(context).withValues(alpha: 0.5),
+                  height: 6,
+                ),
+                itemBuilder: (context, index) {
+                  final item = _selectedItems[index];
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 2),
+                    child: Row(
+                      children: [
+                        Icon(
+                          item.isDirectory ? Icons.folder : Icons.insert_drive_file,
+                          color: item.isDirectory ? const Color(0xFFF59E0B) : badgeColor,
+                          size: 20,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                item.name,
+                                style: TextStyle(
+                                  fontWeight: FontWeight.w600,
+                                  color: AppTheme.textPrimaryOf(context),
+                                  fontSize: 13,
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              Text(
+                                item.isDirectory ? 'Folder • ${formatBytes(item.size)}' : formatBytes(item.size),
+                                style: TextStyle(
+                                  color: AppTheme.textSecondaryOf(context),
+                                  fontSize: 11,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        IconButton(
+                          visualDensity: VisualDensity.compact,
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
+                          icon: Icon(Icons.close, size: 16, color: AppTheme.textSecondaryOf(context)),
+                          onPressed: () => _removeItem(index),
+                        ),
+                      ],
+                    ),
+                  );
+                },
               ),
             ),
-            IconButton(
-              visualDensity: VisualDensity.compact,
-              icon: Icon(Icons.close, color: AppTheme.textSecondaryOf(context)),
-              onPressed: () {
-                setState(() {
-                  _selectedFile = null;
-                  _selectedFileSize = null;
-                });
-                unawaited(FilePicker.clearTemporaryFiles());
-              },
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: _pickFiles,
+                    style: OutlinedButton.styleFrom(
+                      side: BorderSide(color: AppTheme.borderColorOf(context)),
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                    ),
+                    icon: const Icon(Icons.add, size: 16, color: AppTheme.accentPrimary),
+                    label: Text(
+                      'Add Files',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: AppTheme.textPrimaryOf(context),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: _pickFolder,
+                    style: OutlinedButton.styleFrom(
+                      side: BorderSide(color: AppTheme.borderColorOf(context)),
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                    ),
+                    icon: const Icon(Icons.create_new_folder_outlined, size: 16, color: Color(0xFF10B981)),
+                    label: Text(
+                      'Add Folder',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: AppTheme.textPrimaryOf(context),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
             ),
           ],
         ),
       );
     }
 
-    return GestureDetector(
-      onTap: _pickFile,
-      child: Container(
-        width: double.infinity,
-        padding: const EdgeInsets.symmetric(vertical: 14),
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [
-              AppTheme.bgCardOf(context),
-              AppTheme.isDark(context) ? const Color(0xFF1E2835) : const Color(0xFFEFF3F6),
-            ],
-          ),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: AppTheme.borderColorOf(context)),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.upload_file, size: 32, color: AppTheme.textSecondaryOf(context)),
-            const SizedBox(height: 8),
-            Text(
-              'Select File to Send',
-              style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14, color: AppTheme.textPrimaryOf(context)),
-            ),
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 14),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            AppTheme.bgCardOf(context),
+            AppTheme.isDark(context) ? const Color(0xFF1E2835) : const Color(0xFFEFF3F6),
           ],
         ),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppTheme.borderColorOf(context)),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.drive_folder_upload_outlined, size: 36, color: AppTheme.accentPrimary.withValues(alpha: 0.8)),
+          const SizedBox(height: 8),
+          Text(
+            'Select Items to Send',
+            style: TextStyle(fontWeight: FontWeight.w700, fontSize: 15, color: AppTheme.textPrimaryOf(context)),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'Choose individual files or entire folders to transfer',
+            style: TextStyle(fontSize: 12, color: AppTheme.textSecondaryOf(context)),
+          ),
+          const SizedBox(height: 14),
+          Row(
+            children: [
+              Expanded(
+                child: ElevatedButton.icon(
+                  onPressed: _pickFiles,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppTheme.accentPrimary,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 11),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  ),
+                  icon: const Icon(Icons.file_present, size: 18),
+                  label: const Text('Add Files', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: _pickFolder,
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: AppTheme.textPrimaryOf(context),
+                    side: BorderSide(color: AppTheme.borderColorOf(context)),
+                    padding: const EdgeInsets.symmetric(vertical: 11),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  ),
+                  icon: const Icon(Icons.folder_open, size: 18, color: Color(0xFFF59E0B)),
+                  label: const Text('Add Folder', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+                ),
+              ),
+            ],
+          ),
+        ],
       ),
     );
   }
@@ -1241,136 +1170,6 @@ class _SendScreenState extends State<SendScreen> {
     );
   }
 
-  Widget _buildNearbyDevicesSection() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Row(
-          children: [
-            Icon(Icons.devices, size: 18, color: AppTheme.textSecondaryOf(context)),
-            const SizedBox(width: 8),
-            Text(
-              'Nearby Devices',
-              style: TextStyle(
-                fontWeight: FontWeight.w600,
-                color: AppTheme.textPrimaryOf(context),
-                fontSize: 14,
-              ),
-            ),
-            const Spacer(),
-            IconButton(
-              visualDensity: VisualDensity.compact,
-              padding: EdgeInsets.zero,
-              constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-              icon: _isDiscovering
-                  ? const SizedBox(
-                      width: 14,
-                      height: 14,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        color: AppTheme.accentPrimary,
-                      ),
-                    )
-                  : const Icon(Icons.refresh, size: 18, color: AppTheme.accentPrimary),
-              tooltip: 'Refresh Nearby Devices',
-              onPressed: _isDiscovering ? null : _startDiscovery,
-            ),
-          ],
-        ),
-        const SizedBox(height: 8),
-        if (_peers.isEmpty) ...[
-          Container(
-            padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 16),
-            decoration: BoxDecoration(
-              color: AppTheme.bgCardOf(context),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: AppTheme.borderColorOf(context)),
-            ),
-            child: Row(
-              children: [
-                Icon(
-                  Icons.wifi_tethering,
-                  size: 24,
-                  color: AppTheme.textSecondaryOf(context).withValues(alpha: 0.7),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Text(
-                    _isDiscovering
-                        ? 'Searching for devices on same Wi-Fi...'
-                        : 'No nearby devices found. Make sure receiver is open on the same Wi-Fi, or scan its QR code above.',
-                    style: TextStyle(
-                      color: AppTheme.textSecondaryOf(context),
-                      fontSize: 12.5,
-                      height: 1.3,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ] else ...[
-          ListView.separated(
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            padding: EdgeInsets.zero,
-            itemCount: _peers.length,
-            separatorBuilder: (context, index) => const SizedBox(height: 8),
-            itemBuilder: (context, index) {
-              final peer = _peers[index];
-              return Container(
-                decoration: BoxDecoration(
-                  color: AppTheme.bgCardOf(context),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: AppTheme.borderColorOf(context)),
-                ),
-                child: ListTile(
-                  dense: true,
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                  onTap: () {
-                    if (_selectedFile == null) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Please select a file first')),
-                      );
-                      return;
-                    }
-                    _showPinDialog(
-                      peer['address'],
-                      peer['hostname'] ?? 'Unknown Device',
-                      pinRequired: peer['pin_required'] == true,
-                    );
-                  },
-                  leading: Container(
-                    padding: const EdgeInsets.all(8),
-                    decoration: BoxDecoration(
-                      color: AppTheme.bgSidebarOf(context),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: const Icon(Icons.computer, color: AppTheme.accentPrimary, size: 22),
-                  ),
-                  title: Text(
-                    peer['hostname'] ?? 'Unknown Device',
-                    style: TextStyle(fontWeight: FontWeight.w600, color: AppTheme.textPrimaryOf(context)),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  subtitle: Text(
-                    peer['address'] ?? '',
-                    style: TextStyle(color: AppTheme.textSecondaryOf(context), fontSize: 12),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  trailing: const Icon(Icons.send_rounded, color: AppTheme.accentPrimary),
-                ),
-              );
-            },
-          ),
-        ],
-      ],
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     final isSuccess = _phase == TransferUiPhase.succeeded || _showSuccess;
@@ -1413,8 +1212,6 @@ class _SendScreenState extends State<SendScreen> {
                   const SizedBox(height: 12),
                   _buildStatusCard(),
                 ],
-                const SizedBox(height: 20),
-                _buildNearbyDevicesSection(),
               ],
             ],
           ),

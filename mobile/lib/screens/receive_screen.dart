@@ -246,11 +246,12 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
         return;
       }
 
-      if (event['Discovery'] != null) {
-        final discEvent = event['Discovery'];
-        if (discEvent['BroadcastStarted'] != null) {
-          final token = discEvent['BroadcastStarted']['token']?.toString();
-          final port = discEvent['BroadcastStarted']['port'] as int?;
+      if (event['Transfer'] != null) {
+        final trans = event['Transfer'];
+        if (trans['Listening'] != null) {
+          final listening = trans['Listening'];
+          final token = listening['pin']?.toString();
+          final port = listening['port'] as int?;
           setState(() {
             _pin = token;
             _statusMessage = 'Ready to receive files';
@@ -263,9 +264,8 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
               deviceName: deviceName,
             ));
           });
+          return;
         }
-      } else if (event['Transfer'] != null) {
-        final trans = event['Transfer'];
         if (trans['PathSelected'] != null) {
           final path = trans['PathSelected']['path'];
           setState(() {
