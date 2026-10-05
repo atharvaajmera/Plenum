@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
@@ -8,7 +8,6 @@ import {
   Check,
   CheckCircle2,
   X,
-  Smartphone,
   AlertCircle,
   Radio,
   Share2,
@@ -16,7 +15,7 @@ import {
 import { QRCodeSVG } from "qrcode.react";
 import { PlenumEventEnvelope, TransferEvent, ReceiveUnifiedRequest, TransferSummary, IceServer, TransferUiPhase } from "../types/rust";
 import { useSettings } from "../context/SettingsContext";
-import { addHistoryEntry, getHistory } from "../services/history";
+import { addHistoryEntry } from "../services/history";
 import { formatBytes, formatDuration } from "../utils/format";
 import { isStaleSession, abandonSession } from "../utils/session";
 import { createTransferMetrics, updateTransferMetrics, TransferMetricsState } from "../utils/transferMetrics";
@@ -39,23 +38,6 @@ const STATE_LABELS: Record<string, string> = {
 
 const friendlyState = (state: string): string => STATE_LABELS[state] ?? "Connecting to device...";
 
-const formatTimeAgo = (isoString: string): string => {
-  try {
-    const diffMs = Date.now() - new Date(isoString).getTime();
-    const diffMins = Math.floor(diffMs / 60000);
-    if (diffMins < 1) return "Just now";
-    if (diffMins < 60) return `${diffMins}m ago`;
-    const diffHours = Math.floor(diffMins / 60);
-    if (diffHours < 24) return `${diffHours}h ago`;
-    const diffDays = Math.floor(diffHours / 24);
-    if (diffDays === 1) return "Yesterday";
-    if (diffDays < 30) return `${diffDays} days ago`;
-    const diffMonths = Math.floor(diffDays / 30);
-    return `${diffMonths} mo ago`;
-  } catch {
-    return "Recently";
-  }
-};
 
 const ReceivePage: React.FC = () => {
   const navigate = useNavigate();
@@ -67,7 +49,7 @@ const ReceivePage: React.FC = () => {
   const [status, setStatus] = useState<string>("Ready to receive files...");
   const [, setProgress] = useState<{ transferred: number, total: number } | null>(null);
   const [currentFile, setCurrentFile] = useState<{ name: string; totalBytes: number } | null>(null);
-  const [activePeer, setActivePeer] = useState<{ name: string; address?: string } | null>(null);
+  const [, setActivePeer] = useState<{ name: string; address?: string } | null>(null);
   const [pin, setPin] = useState<string | null>(null);
   const [port, setPort] = useState<number | null>(null);
   const [roomCode, setRoomCode] = useState<string | null>(null);
@@ -147,17 +129,6 @@ const ReceivePage: React.FC = () => {
     setStatus("Ready to receive files (Local Wi-Fi & Internet active)");
   };
 
-  const recentPeers = useMemo(() => {
-    const history = getHistory();
-    const unique = new Map<string, { peerName: string; timestamp: string }>();
-    for (const h of history) {
-      if (h.peerName && h.peerName !== "Unknown peer" && !unique.has(h.peerName)) {
-        unique.set(h.peerName, { peerName: h.peerName, timestamp: h.timestamp });
-        if (unique.size >= 3) break;
-      }
-    }
-    return Array.from(unique.values());
-  }, [phase]);
 
   const handleTransferEvent = (trans: TransferEvent) => {
     if (terminalEventRef.current) {
@@ -346,16 +317,16 @@ const ReceivePage: React.FC = () => {
       const fn = await listen<PlenumEventEnvelope>("plenum-event", (event) => {
         const { session_id, event: payload } = event.payload;
         if (isStaleSession(session_id, activeSessionRef, sessionFloorRef)) return;
-        if ("Discovery" in payload) {
-          const disc = payload.Discovery;
-          if (typeof disc === "object" && "BroadcastStarted" in disc) {
-            setPort(disc.BroadcastStarted.port);
-            if (settingsRef.current.receive.requirePin) {
-              setPin(disc.BroadcastStarted.token);
+        if ("Transfer" in payload) {
+          const trans = payload.Transfer;
+          if ("Listening" in trans) {
+            setPort(trans.Listening.port);
+            if (settingsRef.current.receive.requirePin && trans.Listening.pin) {
+              setPin(trans.Listening.pin);
             }
+          } else {
+            handleTransferEventRef.current(trans);
           }
-        } else if ("Transfer" in payload) {
-          handleTransferEventRef.current(payload.Transfer);
         } else if ("Log" in payload) {
           handleLogEventRef.current(payload.Log);
         }
@@ -544,7 +515,6 @@ const ReceivePage: React.FC = () => {
           {username ? ` • ${username}` : ''}
         </div>
 
-        {/* Where nav-buttons-container starts on HomePage, place receive utilities */}
         <div className="receive-utilities-container">
           <div className="receive-page-header">
             <h2 className="receive-page-title">Share the code</h2>
@@ -568,32 +538,31 @@ const ReceivePage: React.FC = () => {
                 {unifiedQr ? (
                   <QRCodeSVG
                     value={unifiedQr}
-                    size={156}
+                    size={228}
                     fgColor="#000000"
                     bgColor="#ffffff"
                     level="M"
                     marginSize={0}
                   />
                 ) : (
-                  <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: "#64748b", height: 156 }}>
-                    <Radio size={28} />
-                    <span style={{ fontSize: "11px", marginTop: "6px" }}>Generating code...</span>
+                  <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: "#64748b", height: 228 }}>
+                    <Radio size={36} />
+                    <span style={{ fontSize: "12px", marginTop: "8px" }}>Generating code...</span>
                   </div>
                 )}
               </div>
             </div>
 
-            {/* Right Column: Status, Code Bar, Devices */}
             <div className="receive-hero-details">
               {/* Status Row */}
               <div className="receive-status-row">
                 <div className={`receive-status-icon-box ${phase === "listening" || phase === "transferring" ? "active" : ""}`}>
                   {phase === "succeeded" ? (
-                    <CheckCircle2 size={18} color="var(--accent-primary)" />
+                    <CheckCircle2 size={22} color="var(--accent-primary)" />
                   ) : isFailed ? (
-                    <AlertCircle size={18} color="#e5484d" />
+                    <AlertCircle size={22} color="#e5484d" />
                   ) : (
-                    <Share2 size={18} />
+                    <Share2 size={22} />
                   )}
                 </div>
                 <div className="receive-status-text">
@@ -606,127 +575,56 @@ const ReceivePage: React.FC = () => {
                       ? "Transfer interrupted"
                       : phase === "connecting"
                       ? "Connecting to device..."
-                      : "Waiting for someone to join"}
+                      : "Waiting for the sender to join"}
                   </div>
-                  <div className="receive-status-subline">
-                    {phase === "transferring"
-                      ? (speedText ? `${speedText}${etaText ? ` • ${etaText}` : ""}` : "Transferring data blocks...")
-                      : phase === "succeeded"
-                      ? (savedPath ? `Saved to ${savedPath}` : "File received successfully")
-                      : isFailed
-                      ? status
-                      : "Closing the app cancels the transfer."}
-                  </div>
+                  {(phase === "transferring" || phase === "succeeded" || isFailed) && (
+                    <div className="receive-status-subline">
+                      {phase === "transferring"
+                        ? (speedText ? `${speedText}${etaText ? ` • ${etaText}` : ""}` : "Transferring data blocks...")
+                        : phase === "succeeded"
+                        ? (savedPath ? `Saved to ${savedPath}` : "File received successfully")
+                        : status}
+                    </div>
+                  )}
                 </div>
               </div>
 
-              {/* Share Code Bar */}
-              <div className="receive-code-bar">
-                <div className="receive-code-content">
-                  <div className="receive-code-string" title={roomCode || "Generating code..."}>
-                    {roomCode || "•••• •••• ••••"}
+              <div className="receive-code-section">
+                <div className="receive-code-label">Room Code</div>
+                <div className="receive-code-bar">
+                  <div className="receive-code-content">
+                    <div className="receive-code-string" title={roomCode || "Generating code..."}>
+                      {roomCode || "•••• •••• ••••"}
+                    </div>
+                    {pin && <span className="receive-pin-badge">PIN: {pin}</span>}
                   </div>
-                  {pin && <span className="receive-pin-badge">PIN: {pin}</span>}
-                </div>
-                <div className="receive-code-actions">
-                  <button
-                    className="receive-code-btn"
-                    onClick={handleCopyRoomCode}
-                    title={roomCodeCopied ? "Copied!" : "Copy code"}
-                  >
-                    {roomCodeCopied ? <Check size={16} color="var(--accent-primary)" /> : <Copy size={16} />}
-                  </button>
-                </div>
-              </div>
-              {copyError && (
-                <div style={{ fontSize: "11px", color: "#e5484d", marginTop: "-4px" }}>
-                  {copyError}
-                </div>
-              )}
-
-              {/* Devices Section */}
-              <div className="receive-devices-section">
-                <div className="receive-section-label">Device</div>
-                {activePeer ? (
-                  <div className="receive-device-item">
-                    <div className="receive-device-left">
-                      <div className="receive-device-icon-box">
-                        <Smartphone size={16} />
-                      </div>
-                      <div className="receive-device-info">
-                        <div className="receive-device-name">
-                          {activePeer.name}
-                        </div>
-                        <div className="receive-device-sub">
-                          {activePeer.address ? `${activePeer.address} • ` : ""}
-                          {phase === "transferring" ? "Transferring file" : phase === "succeeded" ? "Transfer completed" : "Connected"}
-                        </div>
-                      </div>
-                    </div>
-                    <div>
-                      <div className="receive-device-pill">
-                        {phase === "transferring" ? "Receiving" : phase === "succeeded" ? "Completed" : "Connected"}
-                      </div>
-                    </div>
+                  <div className="receive-code-actions">
+                    <button
+                      className="receive-code-btn"
+                      onClick={handleCopyRoomCode}
+                      title={roomCodeCopied ? "Copied!" : "Copy code"}
+                      aria-label="Copy code"
+                    >
+                      {roomCodeCopied ? <Check size={16} color="var(--accent-primary)" /> : <Copy size={16} />}
+                    </button>
                   </div>
-                ) : recentPeers.length > 0 ? (
-                  recentPeers.slice(0, 1).map((peer) => (
-                    <div className="receive-device-item" key={peer.peerName}>
-                      <div className="receive-device-left">
-                        <div className="receive-device-icon-box">
-                          <Smartphone size={16} />
-                        </div>
-                        <div className="receive-device-info">
-                          <div className="receive-device-name">
-                            {peer.peerName}
-                          </div>
-                          <div className="receive-device-sub">
-                            {formatTimeAgo(peer.timestamp)}
-                          </div>
-                        </div>
-                      </div>
-                      <div>
-                        <div className="receive-device-pill" style={{ opacity: 0.9 }}>
-                          Known
-                        </div>
-                      </div>
-                    </div>
-                  ))
-                ) : (
-                  <div className="receive-device-item" style={{ opacity: 0.75, borderStyle: "dashed" }}>
-                    <div className="receive-device-left">
-                      <div className="receive-device-icon-box">
-                        <Smartphone size={16} />
-                      </div>
-                      <div className="receive-device-info">
-                        <div className="receive-device-name" style={{ fontSize: "13px" }}>
-                          No sender connected
-                        </div>
-                        <div className="receive-device-sub">
-                          Nearby devices scanning your QR will appear here
-                        </div>
-                      </div>
-                    </div>
-                    <div>
-                      <div className="receive-device-pill" style={{ backgroundColor: "rgba(255, 255, 255, 0.08)", color: "var(--text-secondary)" }}>
-                        Waiting
-                      </div>
-                    </div>
+                </div>
+                {copyError && (
+                  <div style={{ fontSize: "12px", color: "#e5484d", marginTop: "4px" }}>
+                    {copyError}
                   </div>
                 )}
               </div>
             </div>
           </div>
 
-          {/* Footer Actions */}
           <div className="receive-footer-actions">
             <button className="receive-end-session-btn" onClick={handleEndSession}>
-              End session
+              Cancel
             </button>
           </div>
         </div>
 
-        {/* Error details if dev */}
         {import.meta.env.DEV && isFailed && technicalDetails && (
           <details className="technical-details" style={{ marginTop: "16px" }}>
             <summary>Technical details</summary>

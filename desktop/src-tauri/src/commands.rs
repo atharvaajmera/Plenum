@@ -1,98 +1,25 @@
 use plenum::app::engine::PlenumCore;
 use plenum::app::types::{
-    generate_peer_id, generate_room_code, get_local_ip_addresses, DiscoverRequest,
-    DiscoverySummary, PlenumEvent, ReceiveRemoteRequest, ReceiveRequest, ReceiveUnifiedRequest,
-    SendRemoteRequest, SendRequest, SendUnifiedRequest, SessionControl, TransferSummary,
+    generate_peer_id, generate_room_code, get_local_ip_addresses, PlenumEvent,
+    ReceiveUnifiedRequest, SendUnifiedRequest, SessionControl, TransferSummary,
 };
-// Only referenced by the dev-only diagnostic logging path.
-#[cfg(debug_assertions)]
-use plenum::app::types::LogLevel;
 use plenum::signaling::IceServer;
 use serde_json::json;
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{BufWriter, Write};
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 use tauri::{AppHandle, Emitter};
-// `Manager` powers `app.path()`, used only by dev-only log file handling.
 #[cfg(debug_assertions)]
 use tauri::Manager;
 
-fn unix_millis() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-}
-
 /// Emits a plenum-event stamped with the producing session's id so the
-/// frontend can drop late events from a transfer 
+/// frontend can drop late events from a transfer
 fn emit_event(app: &AppHandle, session_id: u64, event: PlenumEvent) {
     let _ = app.emit(
         "plenum-event",
         json!({ "session_id": session_id, "event": event }),
     );
-}
-
-/// Diagnostic transfer logging is a **development-only** aid.
-///
-/// Release builds persist nothing to disk — no output directories, filenames,
-/// peer/device names, or network diagnostics ever hit a log file — so there is
-/// no retention/consent surface to manage in production. In debug builds a
-/// per-transfer `<role>-<ts>.jsonl` is written to the app log directory and
-/// pruned by [`cleanup_old_transfer_logs`].
-///
-/// Returns `Err` (dev only) so the caller can tell the user diagnostics are
-/// unavailable instead of failing silently.
-#[cfg(debug_assertions)]
-fn create_transfer_log(app: &AppHandle, role: &str) -> Result<(PathBuf, BufWriter<File>), String> {
-    let directory = app.path().app_log_dir().map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
-    let path = directory.join(format!("{role}-{}.jsonl", unix_millis()));
-    let file = File::create(&path).map_err(|e| e.to_string())?;
-    Ok((path, BufWriter::new(file)))
-}
-
-/// Opens a diagnostic log for a transfer, if diagnostics are enabled for this
-/// build.
-///
-/// Debug builds: creates the log and, on failure, emits a `Warn` event so the
-/// developer sees *why* diagnostics are missing (issue: silent `None`).
-/// Release builds: always `None` by design — the silence is expected, so no
-/// warning is emitted.
-#[cfg(debug_assertions)]
-fn open_transfer_log(
-    app: &AppHandle,
-    session_id: u64,
-    role: &str,
-) -> Option<(PathBuf, BufWriter<File>)> {
-    match create_transfer_log(app, role) {
-        Ok(log) => Some(log),
-        Err(err) => {
-            emit_event(
-                app,
-                session_id,
-                PlenumEvent::Log {
-                    level: LogLevel::Warn,
-                    message: format!("diagnostic log unavailable: {err}"),
-                },
-            );
-            None
-        }
-    }
-}
-
-#[cfg(not(debug_assertions))]
-#[inline]
-fn open_transfer_log(
-    _app: &AppHandle,
-    _session_id: u64,
-    _role: &str,
-) -> Option<(PathBuf, BufWriter<File>)> {
-    None
 }
 
 /// Prunes diagnostic logs older than 7 days from the app log directory.
@@ -128,16 +55,6 @@ pub fn cleanup_old_transfer_logs(app: &AppHandle) {
 #[cfg(not(debug_assertions))]
 #[inline]
 pub fn cleanup_old_transfer_logs(_app: &AppHandle) {}
-
-fn write_diagnostic(log: &mut Option<(PathBuf, BufWriter<File>)>, value: serde_json::Value) {
-    let Some((_, writer)) = log.as_mut() else {
-        return;
-    };
-    if serde_json::to_writer(&mut *writer, &value).is_ok() {
-        let _ = writer.write_all(b"\n");
-        let _ = writer.flush();
-    }
-}
 
 /// Registry of every currently-running transfer session, keyed by the numeric
 /// session id handed out by [`register_session`].
@@ -209,149 +126,6 @@ fn default_device_name() -> Option<String> {
     whoami::devicename().ok()
 }
 
-#[tauri::command]
-pub async fn send_file_command(
-    app: AppHandle,
-    mut request: SendRequest,
-) -> Result<TransferSummary, String> {
-    if request.device_name.is_none() {
-        request.device_name = default_device_name();
-    }
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut core = PlenumCore::new();
-        let session_id = register_session(core.control());
-        let mut sink = |event: PlenumEvent| {
-            emit_event(&app, session_id, event);
-        };
-        let result = core
-            .send_file(request, &mut sink)
-            .map_err(|e| e.to_string());
-        unregister_session(session_id);
-        result
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-pub async fn receive_file_command(
-    app: AppHandle,
-    mut request: ReceiveRequest,
-) -> Result<TransferSummary, String> {
-    if request.device_name.is_none() {
-        request.device_name = default_device_name();
-    }
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut core = PlenumCore::new();
-        let session_id = register_session(core.control());
-        let mut diagnostic_log = open_transfer_log(&app, session_id, "lan-receive");
-        write_diagnostic(
-            &mut diagnostic_log,
-            json!({
-                "timestamp_ms": unix_millis(),
-                "kind": "command_started",
-                "role": "receiver",
-                "port": request.port,
-                "output_dir": &request.output_dir,
-            }),
-        );
-        let mut sink = |event: PlenumEvent| {
-            write_diagnostic(
-                &mut diagnostic_log,
-                json!({
-                    "timestamp_ms": unix_millis(),
-                    "kind": "event",
-                    "event": &event,
-                }),
-            );
-            emit_event(&app, session_id, event);
-        };
-        let result = core
-            .receive_file(request, &mut sink)
-            .map_err(|e| e.to_string());
-        drop(sink);
-        write_diagnostic(
-            &mut diagnostic_log,
-            json!({
-                "timestamp_ms": unix_millis(),
-                "kind": "command_finished",
-                "result": match &result {
-                    Ok(summary) => json!({ "ok": summary }),
-                    Err(error) => json!({ "error": error }),
-                },
-            }),
-        );
-        unregister_session(session_id);
-        result
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-pub async fn discover_peers_command(
-    app: AppHandle,
-    request: DiscoverRequest,
-) -> Result<DiscoverySummary, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut core = PlenumCore::new();
-        let mut sink = |event: PlenumEvent| {
-            emit_event(&app, 0, event);
-        };
-        core.discover_peer(request, &mut sink)
-            .map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-pub async fn send_file_remote_command(
-    app: AppHandle,
-    mut request: SendRemoteRequest,
-) -> Result<TransferSummary, String> {
-    if request.device_name.is_none() {
-        request.device_name = default_device_name();
-    }
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut core = PlenumCore::new();
-        let session_id = register_session(core.control());
-        let mut sink = |event: PlenumEvent| {
-            emit_event(&app, session_id, event);
-        };
-        let result = core
-            .send_file_remote(request, &mut sink)
-            .map_err(|e| e.to_string());
-        unregister_session(session_id);
-        result
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-pub async fn receive_file_remote_command(
-    app: AppHandle,
-    mut request: ReceiveRemoteRequest,
-) -> Result<TransferSummary, String> {
-    if request.device_name.is_none() {
-        request.device_name = default_device_name();
-    }
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut core = PlenumCore::new();
-        let session_id = register_session(core.control());
-        let mut sink = |event: PlenumEvent| {
-            emit_event(&app, session_id, event);
-        };
-        let result = core
-            .receive_file_remote(request, &mut sink)
-            .map_err(|e| e.to_string());
-        unregister_session(session_id);
-        result
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
 
 #[tauri::command]
 pub fn generate_room_code_command() -> String {

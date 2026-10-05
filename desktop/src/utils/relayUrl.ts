@@ -93,57 +93,6 @@ export async function lookupRoom(
   }
 }
 
-export async function waitForRoomRegistration(
-  relayUrl: string,
-  roomCode: string,
-  signal?: AbortSignal,
-  timeoutMs: number = 10_000,
-): Promise<RoomLookupResult> {
-  const start = Date.now();
-  let delayMs = 200;
-  let lastResult: RoomLookupResult = { status: "not-found", statusCode: 404 };
-
-  while (Date.now() - start < timeoutMs) {
-    if (signal?.aborted) {
-      return lastResult;
-    }
-
-    const remainingTimeout = timeoutMs - (Date.now() - start);
-    lastResult = await lookupRoom(
-      relayUrl,
-      roomCode,
-      Math.min(2000, remainingTimeout > 0 ? remainingTimeout : 1000)
-    );
-
-    if (lastResult.status === "exists") {
-      return lastResult;
-    }
-
-    if (signal?.aborted) {
-      return lastResult;
-    }
-
-    const remaining = timeoutMs - (Date.now() - start);
-    if (remaining <= 0) break;
-
-    const sleepMs = Math.min(delayMs, remaining);
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, sleepMs);
-      if (signal) {
-        const onAbort = () => {
-          clearTimeout(timer);
-          signal.removeEventListener("abort", onAbort);
-          resolve();
-        };
-        signal.addEventListener("abort", onAbort, { once: true });
-      }
-    });
-
-    delayMs = Math.min(1000, delayMs + 200);
-  }
-
-  return lastResult;
-}
 
 export async function lookupRoomWithGracePeriod(
   relayUrl: string,

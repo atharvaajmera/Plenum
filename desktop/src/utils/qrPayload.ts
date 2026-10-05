@@ -1,15 +1,6 @@
 import { UnifiedSharePayload } from "../types/rust";
 
 // Helper utilities for encoding and decoding QR payloads.
-export function encodeRoomQr(code: string): string {
-  const trimmed = code.trim().toUpperCase();
-  return `plenum://room/${encodeURIComponent(trimmed)}`;
-}
-
-export function encodePinQr(pin: string): string {
-  const trimmed = pin.trim();
-  return `plenum://pin/${encodeURIComponent(trimmed)}`;
-}
 
 export function encodeUnifiedQr(payload: UnifiedSharePayload): string {
   const params = new URLSearchParams();

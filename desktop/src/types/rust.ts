@@ -11,62 +11,10 @@ export interface TransferOptions {
     timeout_ticks: number;
 }
 
-export interface DiscoverRequest {
-    token?: string;
-    timeout_secs: number;
-    permissions: CorePermissions;
-}
-
-export interface SendRequest {
-    file_path: string;
-    address?: string;
-    discovery_token?: string;
-    // Omitted -> backend fills in whoami::devicename()
-    device_name?: string;
-    permissions: CorePermissions;
-    options: TransferOptions;
-}
-
-export interface ReceiveRequest {
-    port: number;
-    output_dir: string;
-    announce_on_lan: boolean;
-    device_name?: string;
-    require_pin?: boolean;
-    auto_accept?: boolean;
-    permissions: CorePermissions;
-    options: TransferOptions;
-}
-
 export interface IceServer {
     urls: string[];
     username?: string;
     credential?: string;
-}
-
-export interface SendRemoteRequest {
-    file_path: string;
-    relay_server_url: string;
-    session_id: string;
-    my_peer_id: string;
-    ice_servers: IceServer[];
-    connect_timeout_secs: number;
-    device_name?: string;
-    permissions: CorePermissions;
-    options: TransferOptions;
-}
-
-export interface ReceiveRemoteRequest {
-    output_dir: string;
-    relay_server_url: string;
-    session_id: string;
-    my_peer_id: string;
-    ice_servers: IceServer[];
-    connect_timeout_secs: number;
-    auto_accept?: boolean;
-    device_name?: string;
-    permissions: CorePermissions;
-    options: TransferOptions;
 }
 
 export interface UnifiedSharePayload {
@@ -84,7 +32,8 @@ export type SelectedPath =
     | { Internet: { room_code: string, is_relayed: boolean } };
 
 export interface SendUnifiedRequest {
-    file_path: string;
+    file_path?: string;
+    file_paths?: string[];
     payload: UnifiedSharePayload;
     relay_server_url: string;
     my_peer_id: string;
@@ -105,17 +54,9 @@ export interface ReceiveUnifiedRequest {
     port?: number;
     require_pin?: boolean;
     auto_accept?: boolean;
-    announce_on_lan?: boolean;
     device_name?: string;
     permissions: CorePermissions;
     options: TransferOptions;
-}
-
-export interface DiscoverySummary {
-    hostname: string;
-    address: string;
-    token: string;
-    pin_required: boolean;
 }
 
 export type ConnectionState = "Discovering" | "Listening" | "Connecting" | "SignalingConnected" | "NegotiatingIce" | "Connected" | "Closed";
@@ -150,6 +91,7 @@ export interface TransferSummary {
 
 // Struct variants mapped to standard objects inside the enum
 export type TransferEvent =
+    | { Listening: { port: number, pin?: string | null } }
     | { StateChanged: { direction: TransferDirection, state: ConnectionState, peer?: string } }
     | { PathSelected: { direction: TransferDirection, path: SelectedPath, description: string } }
     | { IncomingRequest: { direction: TransferDirection, file_name: string, total_bytes: number, peer?: string, sender_name?: string } }
@@ -162,18 +104,12 @@ export type TransferEvent =
     | { Resumed: { direction: TransferDirection, next_sequence: number, resumed_bytes: number } }
     | { Progress: { direction: TransferDirection, transferred_bytes: number, total_bytes: number } }
     | { CheckpointUpdated: { checkpoint_path: string, next_sequence: number, bytes_written: number } }
+    | { Packaging: { current_item: number, total_items: number, current_name: string, bytes_packaged: number } }
     | { Completed: TransferSummary };
-
-export type DiscoveryEvent =
-    | { SearchStarted: { token?: string, timeout_secs: number } }
-    | { BroadcastStarted: { token: string, port: number } }
-    | { PeerFound: DiscoverySummary }
-    | "PeerNotFound";
 
 export type PlenumEvent =
     | { Log: { level: string, message: string } }
-    | { Transfer: TransferEvent }
-    | { Discovery: DiscoveryEvent };
+    | { Transfer: TransferEvent };
 
 // Every plenum-event the desktop backend emits is wrapped with the id of the
 // backend session that produced it

@@ -1,11 +1,5 @@
 pub mod commands;
 
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-#[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
-}
-
 #[tauri::command]
 fn get_device_name() -> Option<String> {
     whoami::devicename().ok()
@@ -34,15 +28,9 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            greet,
             get_device_name,
             get_username,
             get_local_ip,
-            commands::send_file_command,
-            commands::receive_file_command,
-            commands::discover_peers_command,
-            commands::send_file_remote_command,
-            commands::receive_file_remote_command,
             commands::generate_room_code_command,
             commands::generate_peer_id_command,
             commands::fetch_turn_credentials_command,
