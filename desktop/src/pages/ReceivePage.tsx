@@ -6,11 +6,8 @@ import { downloadDir } from "@tauri-apps/api/path";
 import {
   Copy,
   Check,
-  CheckCircle2,
   X,
-  AlertCircle,
   Radio,
-  Share2,
 } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import { PlenumEventEnvelope, TransferEvent, ReceiveUnifiedRequest, TransferSummary, IceServer, TransferUiPhase } from "../types/rust";
@@ -556,15 +553,6 @@ const ReceivePage: React.FC = () => {
             <div className="receive-hero-details">
               {/* Status Row */}
               <div className="receive-status-row">
-                <div className={`receive-status-icon-box ${phase === "listening" || phase === "transferring" ? "active" : ""}`}>
-                  {phase === "succeeded" ? (
-                    <CheckCircle2 size={22} color="var(--accent-primary)" />
-                  ) : isFailed ? (
-                    <AlertCircle size={22} color="#e5484d" />
-                  ) : (
-                    <Share2 size={22} />
-                  )}
-                </div>
                 <div className="receive-status-text">
                   <div className="receive-status-headline">
                     {phase === "transferring"

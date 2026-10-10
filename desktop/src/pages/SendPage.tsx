@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { File, Folder, Plus, X, Trash2, CheckCircle2, ArrowRight } from "lucide-react";
+import { FolderUp, FolderOpen, FileText, File, Folder, X, Trash2, CheckCircle2, ArrowRight } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
@@ -187,13 +187,10 @@ const SendPage: React.FC = () => {
             setSpeedText(null);
             setEtaText(null);
             metricsRef.current = null;
-            if (autoResetRef.current) clearTimeout(autoResetRef.current);
-            autoResetRef.current = setTimeout(() => {
-              setPhase("idle");
-              setSendSuccess(false);
-              setTransferStatus("");
-              terminalEventRef.current = false;
-            }, 5000);
+            if (autoResetRef.current) {
+              clearTimeout(autoResetRef.current);
+              autoResetRef.current = null;
+            }
           }
         } else if ("Log" in payload) {
           if (!terminalEventRef.current) {
@@ -238,11 +235,15 @@ const SendPage: React.FC = () => {
       setTransferStatus("Please select files or a folder first");
       return;
     }
-    const inputVal = roomCodeInput.trim();
-    if (inputVal === "") {
+    const rawVal = roomCodeInput.trim();
+    if (rawVal === "") {
       setTransferStatus("Please enter a room code or paste a Plenum link");
       return;
     }
+
+    const inputVal = (rawVal.toLowerCase().startsWith("plenum://") || rawVal.toLowerCase().startsWith("http"))
+      ? rawVal
+      : rawVal.toUpperCase();
 
     const parsed = parseQrPayload(inputVal);
     if (!parsed || (parsed.type !== "unified" && parsed.type !== "room")) {
@@ -347,11 +348,36 @@ const SendPage: React.FC = () => {
     setSelectedPaths([]);
   };
 
+  const handleResetToSendMain = () => {
+    if (autoResetRef.current) {
+      clearTimeout(autoResetRef.current);
+      autoResetRef.current = null;
+    }
+    setPhase("idle");
+    setSendSuccess(false);
+    setTransferStatus("");
+    setSelectedPaths([]);
+    setActivePathBadge(null);
+    setProgress(null);
+    setSpeedText(null);
+    setEtaText(null);
+    setRoomCodeInput("");
+    setIsConnectingRemote(false);
+    setIsTransferActive(false);
+    metricsRef.current = null;
+    terminalEventRef.current = false;
+  };
+
   const isSuccess = phase === "succeeded" || sendSuccess;
   const isInFlight = (phase === "connecting" || phase === "awaitingApproval" || phase === "transferring" || phase === "cancelling" || isTransferActive || isConnectingRemote) && !isSuccess;
 
   return (
-    <div style={{ position: "relative", height: "100%" }} data-phase={phase}>
+    <div className="send-container" data-phase={phase}>
+      <div className="send-page-header">
+        <h1 className="send-page-title">Send Files</h1>
+        <p className="send-page-subtitle">Select files or folders and enter the receiver's code to start transferring.</p>
+      </div>
+
       {isDragging && (
         <div style={{
           position: "absolute",
@@ -361,7 +387,7 @@ const SendPage: React.FC = () => {
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
-          borderRadius: "12px",
+          borderRadius: "16px",
           border: "2px dashed var(--accent-primary)"
         }}>
           <h2 style={{ color: "var(--accent-primary)" }}>Drop files or folders here to send</h2>
@@ -369,7 +395,7 @@ const SendPage: React.FC = () => {
       )}
 
       <div className="card-section">
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px" }}>
           <h2 className="section-title" style={{ margin: 0 }}>Files &amp; Folders</h2>
           {selectedPaths.length > 0 && (
             <div style={{ display: "flex", gap: "8px" }}>
@@ -390,7 +416,7 @@ const SendPage: React.FC = () => {
                   cursor: isInFlight ? "default" : "pointer",
                 }}
               >
-                <Plus size={14} /> Add Files
+                <FileText size={14} /> Add Files
               </button>
               <button
                 type="button"
@@ -409,7 +435,7 @@ const SendPage: React.FC = () => {
                   cursor: isInFlight ? "default" : "pointer",
                 }}
               >
-                <Folder size={14} /> Add Folder
+                <FolderOpen size={14} /> Add Folder
               </button>
               <button
                 type="button"
@@ -436,31 +462,19 @@ const SendPage: React.FC = () => {
         </div>
 
         {selectedPaths.length === 0 ? (
-          <div
-            className="action-card"
-            style={{
-              padding: "24px 16px",
-              textAlign: "center",
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-              gap: "10px",
-              borderStyle: "dashed",
-            }}
-          >
-            <div style={{ display: "flex", gap: "12px", color: "var(--text-secondary)" }}>
-              <File size={28} />
-              <Folder size={28} />
+          <div className="send-dropzone-card">
+            <div style={{ color: "var(--accent-primary)", opacity: 0.9 }}>
+              <FolderUp size={44} strokeWidth={1.8} />
             </div>
             <div>
-              <div style={{ fontWeight: 600, color: "var(--text-primary)", fontSize: "14px" }}>
+              <div style={{ fontWeight: 600, color: "var(--text-primary)", fontSize: "16px" }}>
                 Select files or folders to send
               </div>
-              <div style={{ fontSize: "12px", color: "var(--text-secondary)", marginTop: "2px" }}>
-                or drag &amp; drop them anywhere
+              <div style={{ fontSize: "13.5px", color: "var(--text-secondary)", marginTop: "4px" }}>
+                or drag &amp; drop them anywhere into this window
               </div>
             </div>
-            <div style={{ display: "flex", gap: "10px", marginTop: "4px" }}>
+            <div style={{ display: "flex", gap: "12px", marginTop: "8px" }}>
               <button
                 type="button"
                 onClick={handleSelectFiles}
@@ -468,18 +482,19 @@ const SendPage: React.FC = () => {
                 style={{
                   display: "inline-flex",
                   alignItems: "center",
-                  gap: "6px",
-                  padding: "8px 14px",
+                  gap: "7px",
+                  padding: "10px 20px",
                   borderRadius: "8px",
                   backgroundColor: "var(--accent-primary)",
                   color: "white",
                   border: "none",
                   fontWeight: 600,
-                  fontSize: "13px",
+                  fontSize: "14px",
                   cursor: isInFlight ? "default" : "pointer",
+                  boxShadow: "0 2px 8px rgba(89, 178, 134, 0.25)",
                 }}
               >
-                <Plus size={15} /> Choose Files
+                <FileText size={16} /> Choose Files
               </button>
               <button
                 type="button"
@@ -488,18 +503,18 @@ const SendPage: React.FC = () => {
                 style={{
                   display: "inline-flex",
                   alignItems: "center",
-                  gap: "6px",
-                  padding: "8px 14px",
+                  gap: "7px",
+                  padding: "10px 20px",
                   borderRadius: "8px",
                   backgroundColor: "var(--bg-sidebar)",
                   border: "1px solid var(--border-color)",
                   color: "var(--text-primary)",
                   fontWeight: 600,
-                  fontSize: "13px",
+                  fontSize: "14px",
                   cursor: isInFlight ? "default" : "pointer",
                 }}
               >
-                <Folder size={15} /> Choose Folder
+                <FolderOpen size={16} /> Choose Folder
               </button>
             </div>
           </div>
@@ -508,7 +523,7 @@ const SendPage: React.FC = () => {
             style={{
               backgroundColor: "var(--bg-card)",
               border: "1px solid var(--border-color)",
-              borderRadius: "10px",
+              borderRadius: "12px",
               overflow: "hidden",
             }}
           >
@@ -517,10 +532,10 @@ const SendPage: React.FC = () => {
                 display: "flex",
                 justifyContent: "space-between",
                 alignItems: "center",
-                padding: "8px 12px",
+                padding: "10px 14px",
                 backgroundColor: "var(--bg-sidebar)",
                 borderBottom: "1px solid var(--border-color)",
-                fontSize: "12px",
+                fontSize: "13px",
                 fontWeight: 600,
                 color: "var(--text-primary)",
               }}
@@ -528,7 +543,7 @@ const SendPage: React.FC = () => {
               <span>
                 {selectedPaths.length} {selectedPaths.length === 1 ? "item" : "items"} selected
               </span>
-              <span style={{ fontSize: "11px", color: "var(--accent-primary)" }}>
+              <span style={{ fontSize: "11.5px", color: "var(--accent-primary)", fontWeight: 650 }}>
                 {selectedPaths.length === 1 && !selectedPaths[0].includes(".")
                   ? "Folder (ZIP)"
                   : selectedPaths.length === 1
@@ -536,7 +551,7 @@ const SendPage: React.FC = () => {
                   : "Multi-file (ZIP)"}
               </span>
             </div>
-            <div style={{ maxHeight: "140px", overflowY: "auto", padding: "6px" }}>
+            <div style={{ maxHeight: "180px", overflowY: "auto", padding: "8px" }}>
               {selectedPaths.map((itemPath) => {
                 const baseName = itemPath.split(/[/\\]/).pop() || itemPath;
                 const isFolderLike = !baseName.includes(".");
@@ -547,18 +562,18 @@ const SendPage: React.FC = () => {
                       display: "flex",
                       alignItems: "center",
                       justifyContent: "space-between",
-                      padding: "6px 8px",
-                      borderRadius: "6px",
-                      backgroundColor: "var(--bg-card)",
-                      marginBottom: "3px",
-                      fontSize: "13px",
+                      padding: "8px 10px",
+                      borderRadius: "8px",
+                      backgroundColor: "var(--bg-sidebar)",
+                      marginBottom: "5px",
+                      fontSize: "13.5px",
                     }}
                   >
-                    <div style={{ display: "flex", alignItems: "center", gap: "8px", overflow: "hidden" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "10px", overflow: "hidden" }}>
                       {isFolderLike ? (
-                        <Folder size={16} color="var(--accent-primary)" style={{ flexShrink: 0 }} />
+                        <Folder size={18} color="var(--accent-primary)" style={{ flexShrink: 0 }} />
                       ) : (
-                        <File size={16} color="var(--text-secondary)" style={{ flexShrink: 0 }} />
+                        <File size={18} color="var(--text-secondary)" style={{ flexShrink: 0 }} />
                       )}
                       <span
                         style={{
@@ -582,14 +597,14 @@ const SendPage: React.FC = () => {
                           border: "none",
                           color: "var(--text-secondary)",
                           cursor: "pointer",
-                          padding: "2px",
+                          padding: "4px",
                           display: "flex",
                           alignItems: "center",
                           borderRadius: "4px",
                         }}
                         title="Remove"
                       >
-                        <X size={14} />
+                        <X size={15} />
                       </button>
                     )}
                   </div>
@@ -604,19 +619,58 @@ const SendPage: React.FC = () => {
         <div className="section-title">
           <span>Connect to Receiver</span>
         </div>
-        <div style={{ display: "flex", gap: "12px" }}>
+        <div style={{ display: "flex", gap: "12px", alignItems: "center" }}>
           <input
             type="text"
+            className="send-code-input"
             value={roomCodeInput}
-            onChange={(e) => setRoomCodeInput(e.target.value)}
-            placeholder="Enter 9-character code or paste Plenum link"
-            style={{ flex: 1, padding: "10px 12px", borderRadius: "8px", border: "1px solid var(--border-color)", backgroundColor: "var(--bg-sidebar)", color: "var(--text-primary)", outline: "none", fontSize: "14px", letterSpacing: "1px" }}
+            onChange={(e) => {
+              const val = e.target.value;
+              if (val.trim().toLowerCase().startsWith("plenum://") || val.trim().toLowerCase().startsWith("http")) {
+                setRoomCodeInput(val);
+              } else {
+                setRoomCodeInput(val.toUpperCase());
+              }
+            }}
+            placeholder="enter the room code"
+            style={{
+              flex: 1,
+              padding: "12px 16px",
+              borderRadius: "10px",
+              border: "1px solid var(--border-color)",
+              backgroundColor: "var(--bg-sidebar)",
+              color: "var(--text-primary)",
+              outline: "none",
+              fontSize: "14px",
+              letterSpacing: roomCodeInput
+                ? (roomCodeInput.trim().toLowerCase().startsWith("plenum://") ? "0.5px" : "1.8px")
+                : "normal",
+              textTransform: roomCodeInput
+                ? (roomCodeInput.trim().toLowerCase().startsWith("plenum://") ? "none" : "uppercase")
+                : "none",
+              boxShadow: "0 2px 8px rgba(0, 0, 0, 0.12)",
+            }}
             onKeyDown={(e) => { if (e.key === "Enter") handleRoomCodeConnect(); }}
           />
           <button
             onClick={handleRoomCodeConnect}
             disabled={isConnectingRemote || isTransferActive}
-            style={{ display: "inline-flex", alignItems: "center", gap: "6px", padding: "10px 20px", borderRadius: "8px", border: "none", backgroundColor: "var(--accent-primary)", color: "white", fontWeight: 600, cursor: (isConnectingRemote || isTransferActive) ? "default" : "pointer", opacity: (isConnectingRemote || isTransferActive) ? 0.6 : 1 }}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: "8px",
+              padding: "12px 24px",
+              borderRadius: "10px",
+              border: "none",
+              backgroundColor: "var(--accent-primary)",
+              color: "white",
+              fontWeight: 650,
+              fontSize: "14px",
+              cursor: (isConnectingRemote || isTransferActive) ? "default" : "pointer",
+              opacity: (isConnectingRemote || isTransferActive) ? 0.6 : 1,
+              boxShadow: "0 4px 14px rgba(89, 178, 134, 0.28)",
+              transition: "all 0.15s ease",
+            }}
           >
             <span>Connect</span>
             <ArrowRight size={16} />
@@ -665,15 +719,33 @@ const SendPage: React.FC = () => {
                 </button>
               </div>
             )}
+            {isSuccess && (
+              <div style={{ marginTop: "16px" }}>
+                <button
+                  type="button"
+                  onClick={handleResetToSendMain}
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    gap: "6px",
+                    padding: "8px 26px",
+                    borderRadius: "8px",
+                    backgroundColor: "var(--accent-primary)",
+                    color: "white",
+                    border: "none",
+                    fontWeight: 600,
+                    fontSize: "13px",
+                    cursor: "pointer",
+                    transition: "opacity 0.15s ease",
+                  }}
+                >
+                  Done
+                </button>
+              </div>
+            )}
           </div>
         )}
-
-        <div style={{ marginTop: "32px", textAlign: "center" }}>
-          <p style={{ fontSize: "13px", color: "var(--text-secondary)", lineHeight: "1.6" }}>
-            Enter the 9-character room code or paste the link from the receiving device.<br />
-            Plenum automatically prioritizes direct high-speed local Wi-Fi, falling back to Internet relay if needed.
-          </p>
-        </div>
       </div>
     </div>
   );

@@ -834,7 +834,7 @@ select.pill-select option {
 }
 
 .receive-code-string {
-  font-family: ui-monospace, "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  /* font-family: ui-monospace, "Cascadia Code", "SFMono-Regular", Consolas, monospace; */
   font-size: 17px;
   font-weight: 650;
   letter-spacing: 1.5px;
@@ -902,4 +902,59 @@ select.pill-select option {
 .receive-end-session-btn:hover {
   background: var(--bg-card-hover);
   border-color: rgba(255, 255, 255, 0.25);
+}
+
+/* --- Send Page Styles --- */
+.send-container {
+  width: 100%;
+  max-width: 720px;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  padding: 8px 16px 40px;
+  position: relative;
+}
+
+.send-page-header {
+  margin-bottom: 24px;
+}
+
+.send-page-title {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+  letter-spacing: -0.4px;
+}
+
+.send-page-subtitle {
+  font-size: 13.5px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+
+.send-dropzone-card {
+  padding: 36px 24px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  border: 2px solid var(--border-color);
+  border-radius: 16px;
+  background: linear-gradient(145deg, var(--bg-card), rgba(44, 57, 73, 0.3));
+  transition: all 0.2s ease;
+  box-sizing: border-box;
+}
+
+.send-dropzone-card:hover {
+  border-color: var(--accent-primary);
+  background: linear-gradient(145deg, var(--bg-card-hover), rgba(89, 178, 134, 0.08));
+}
+
+.send-code-input::placeholder {
+  text-transform: lowercase;
+  letter-spacing: normal;
+  color: var(--text-secondary);
+  opacity: 0.7;
 }
