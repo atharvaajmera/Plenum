@@ -20,6 +20,7 @@ import '../utils/transfer_status.dart';
 import '../utils/formatters.dart';
 import '../utils/transfer_metrics.dart';
 import '../widgets/success_check.dart';
+import '../widgets/qr_card_frame.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import '../utils/qr_payload.dart';
 import 'settings_screen.dart';
@@ -800,29 +801,20 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                 ),
               ),
               if (_unifiedQrPayload != null) ...[
-                const SizedBox(width: 12),
+                const SizedBox(width: 14),
                 GestureDetector(
                   onTap: () => _showEnlargedQrDialog(context),
-                  child: Container(
+                  child: QrCardFrame(
+                    showCorners: false,
+                    cardRadius: 14,
                     padding: const EdgeInsets.all(6),
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(10),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withValues(alpha: 0.25),
-                          blurRadius: 6,
-                          offset: const Offset(0, 2),
-                        ),
-                      ],
-                    ),
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         QrImageView(
                           data: _unifiedQrPayload!,
                           version: QrVersions.auto,
-                          size: 88,
+                          size: 84,
                           backgroundColor: Colors.white,
                           padding: const EdgeInsets.all(2),
                           eyeStyle: const QrEyeStyle(
@@ -871,7 +863,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
         backgroundColor: AppTheme.bgCardOf(context),
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(20),
-          side: const BorderSide(color: AppTheme.accentPrimary),
+          side: BorderSide(color: AppTheme.borderColorOf(context)),
         ),
         child: Padding(
           padding: const EdgeInsets.all(24),
@@ -895,26 +887,19 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                   ),
                 ],
               ),
-              const SizedBox(height: 16),
-              Container(
+              const SizedBox(height: 20),
+              QrCardFrame(
+                cardRadius: 18,
+                cornerLength: 28,
+                borderWidth: 3.5,
+                cornerOffset: 4,
                 padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(16),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.3),
-                      blurRadius: 12,
-                      offset: const Offset(0, 4),
-                    ),
-                  ],
-                ),
                 child: QrImageView(
                   data: _unifiedQrPayload!,
                   version: QrVersions.auto,
                   size: 220,
                   backgroundColor: Colors.white,
-                  padding: const EdgeInsets.all(6),
+                  padding: const EdgeInsets.all(4),
                   eyeStyle: const QrEyeStyle(
                     eyeShape: QrEyeShape.square,
                     color: Colors.black,
@@ -925,7 +910,7 @@ class _ReceiveScreenState extends State<ReceiveScreen> {
                   ),
                 ),
               ),
-              const SizedBox(height: 16),
+              const SizedBox(height: 20),
               Text(
                 'Room: $_roomCode${_pin != null ? ' • PIN: $_pin' : ''}',
                 style: const TextStyle(

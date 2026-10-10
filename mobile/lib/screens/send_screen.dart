@@ -657,7 +657,7 @@ class _SendScreenState extends State<SendScreen> {
                       children: [
                         Icon(
                           item.isDirectory ? Icons.folder : Icons.insert_drive_file,
-                          color: item.isDirectory ? const Color(0xFFF59E0B) : badgeColor,
+                          color: item.isDirectory ? AppTheme.accentPrimary : badgeColor,
                           size: 20,
                         ),
                         const SizedBox(width: 8),
@@ -729,7 +729,7 @@ class _SendScreenState extends State<SendScreen> {
                       padding: const EdgeInsets.symmetric(vertical: 8),
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
                     ),
-                    icon: const Icon(Icons.create_new_folder_outlined, size: 16, color: Color(0xFF10B981)),
+                    icon: const Icon(Icons.create_new_folder_outlined, size: 16, color: AppTheme.accentPrimary),
                     label: Text(
                       'Add Folder',
                       style: TextStyle(
@@ -780,15 +780,15 @@ class _SendScreenState extends State<SendScreen> {
           Row(
             children: [
               Expanded(
-                child: ElevatedButton.icon(
+                child: OutlinedButton.icon(
                   onPressed: _pickFiles,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: AppTheme.accentPrimary,
-                    foregroundColor: Colors.white,
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: AppTheme.textPrimaryOf(context),
+                    side: BorderSide(color: AppTheme.borderColorOf(context)),
                     padding: const EdgeInsets.symmetric(vertical: 11),
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                   ),
-                  icon: const Icon(Icons.file_present, size: 18),
+                  icon: const Icon(Icons.file_present, size: 18, color: AppTheme.accentPrimary),
                   label: const Text('Add Files', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
                 ),
               ),
@@ -802,7 +802,7 @@ class _SendScreenState extends State<SendScreen> {
                     padding: const EdgeInsets.symmetric(vertical: 11),
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                   ),
-                  icon: const Icon(Icons.folder_open, size: 18, color: Color(0xFFF59E0B)),
+                  icon: const Icon(Icons.folder_open, size: 18, color: AppTheme.accentPrimary),
                   label: const Text('Add Folder', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
                 ),
               ),

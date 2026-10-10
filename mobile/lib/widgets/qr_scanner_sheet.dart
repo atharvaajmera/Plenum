@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:vibration/vibration.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../theme.dart';
@@ -99,7 +100,7 @@ class _QrScannerSheetState extends State<QrScannerSheet>
     super.dispose();
   }
 
-  void _onDetect(BarcodeCapture capture) {
+  Future<void> _onDetect(BarcodeCapture capture) async {
     if (_hasDetected) return;
 
     for (final barcode in capture.barcodes) {
@@ -110,8 +111,21 @@ class _QrScannerSheetState extends State<QrScannerSheet>
       final payload = QrPayload.parse(rawValue);
       if (payload != null) {
         _hasDetected = true;
-        HapticFeedback.mediumImpact();
-        Navigator.of(context).pop(payload);
+        try {
+          final hasVibrator = await Vibration.hasVibrator();
+          if (hasVibrator == true) {
+            await Vibration.vibrate(duration: 80);
+          } else {
+            await HapticFeedback.vibrate();
+          }
+        } catch (_) {
+          try {
+            await HapticFeedback.vibrate();
+          } catch (_) {}
+        }
+        if (mounted) {
+          Navigator.of(context).pop(payload);
+        }
         break;
       }
     }
@@ -289,7 +303,6 @@ class _QrScannerSheetState extends State<QrScannerSheet>
               size: Size(constraints.maxWidth, constraints.maxHeight),
               painter: _ScannerOverlayPainter(
                 cutoutRect: cutoutRect,
-                borderRadius: 16,
                 borderColor: AppTheme.accentPrimary,
                 cornerLength: 28,
                 borderWidth: 3.5,
@@ -372,19 +385,17 @@ class _QrScannerSheetState extends State<QrScannerSheet>
   }
 }
 
-/// CustomPainter that cuts a transparent hole in a dark overlay without using broken blend modes.
+/// CustomPainter that cuts a transparent square hole in a dark overlay with 4 square right-angle corner brackets.
 class _ScannerOverlayPainter extends CustomPainter {
   static const Color overlayColor = Color(0x99000000);
 
   final Rect cutoutRect;
-  final double borderRadius;
   final Color borderColor;
   final double borderWidth;
   final double cornerLength;
 
   _ScannerOverlayPainter({
     required this.cutoutRect,
-    this.borderRadius = 16,
     required this.borderColor,
     this.borderWidth = 3.5,
     this.cornerLength = 28,
@@ -392,63 +403,69 @@ class _ScannerOverlayPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    // 1. Dark semi-transparent scrim with transparent cutout hole
+    // 1. Dark semi-transparent scrim with square cutout hole
     final bgPath = Path()..addRect(Rect.fromLTWH(0, 0, size.width, size.height));
-    final holePath = Path()
-      ..addRRect(RRect.fromRectAndRadius(cutoutRect, Radius.circular(borderRadius)));
+    final holePath = Path()..addRect(cutoutRect);
     final overlayPath = Path.combine(PathOperation.difference, bgPath, holePath);
     canvas.drawPath(overlayPath, Paint()..color = overlayColor);
 
-    // 2. Corner brackets around the cutout
+    // 2. 4 square corner brackets around the cutout
+    final glowPaint = Paint()
+      ..color = borderColor.withValues(alpha: 0.45)
+      ..strokeWidth = borderWidth + 1.5
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.square
+      ..strokeJoin = StrokeJoin.miter
+      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4);
+
     final cornerPaint = Paint()
       ..color = borderColor
       ..strokeWidth = borderWidth
       ..style = PaintingStyle.stroke
-      ..strokeCap = StrokeCap.round;
+      ..strokeCap = StrokeCap.square
+      ..strokeJoin = StrokeJoin.miter;
 
     final left = cutoutRect.left;
     final top = cutoutRect.top;
     final right = cutoutRect.right;
     final bottom = cutoutRect.bottom;
-    final r = borderRadius;
     final l = cornerLength;
 
-    // Top-Left
+    // Top-Left (90° square corner)
     final pathTL = Path()
       ..moveTo(left, top + l)
-      ..lineTo(left, top + r)
-      ..arcToPoint(Offset(left + r, top), radius: Radius.circular(r))
+      ..lineTo(left, top)
       ..lineTo(left + l, top);
-    canvas.drawPath(pathTL, cornerPaint);
 
-    // Top-Right
+    // Top-Right (90° square corner)
     final pathTR = Path()
       ..moveTo(right - l, top)
-      ..lineTo(right - r, top)
-      ..arcToPoint(Offset(right, top + r), radius: Radius.circular(r))
+      ..lineTo(right, top)
       ..lineTo(right, top + l);
-    canvas.drawPath(pathTR, cornerPaint);
 
-    // Bottom-Left
+    // Bottom-Left (90° square corner)
     final pathBL = Path()
       ..moveTo(left, bottom - l)
-      ..lineTo(left, bottom - r)
-      ..arcToPoint(Offset(left + r, bottom), radius: Radius.circular(r))
+      ..lineTo(left, bottom)
       ..lineTo(left + l, bottom);
-    canvas.drawPath(pathBL, cornerPaint);
 
-    // Bottom-Right
+    // Bottom-Right (90° square corner)
     final pathBR = Path()
       ..moveTo(right - l, bottom)
-      ..lineTo(right - r, bottom)
-      ..arcToPoint(Offset(right, bottom - r), radius: Radius.circular(r))
+      ..lineTo(right, bottom)
       ..lineTo(right, bottom - l);
-    canvas.drawPath(pathBR, cornerPaint);
+
+    for (final path in [pathTL, pathTR, pathBL, pathBR]) {
+      canvas.drawPath(path, glowPaint);
+      canvas.drawPath(path, cornerPaint);
+    }
   }
 
   @override
   bool shouldRepaint(covariant _ScannerOverlayPainter oldDelegate) {
     return oldDelegate.cutoutRect != cutoutRect ||
-        oldDelegate.borderColor != borderColor;
+        oldDelegate.borderColor != borderColor ||
+        oldDelegate.borderWidth != borderWidth ||
+        oldDelegate.cornerLength != cornerLength;
   }
 }
