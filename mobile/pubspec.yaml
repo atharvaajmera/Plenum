@@ -50,6 +50,7 @@ dependencies:
   provider: ^6.1.5+1
   qr_flutter: ^4.1.0
   mobile_scanner: ^6.0.4
+  vibration: ^3.2.1
 
 dev_dependencies:
   flutter_test:

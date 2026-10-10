@@ -1,4 +1,4 @@
-package com.example.mobile
+package com.plenum.mobile
 
 import android.content.ContentValues
 import android.content.Context

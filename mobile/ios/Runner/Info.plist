@@ -7,7 +7,15 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>Mobile</string>
+	<string>Plenum</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Plenum requires camera access to scan connection QR codes.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Plenum requires local network access to discover and transfer files directly to nearby devices on the same Wi-Fi network.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_plenum._tcp</string>
+	</array>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
