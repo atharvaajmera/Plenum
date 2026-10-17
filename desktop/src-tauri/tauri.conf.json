@@ -26,7 +26,7 @@
       "endpoints": [
         "https://github.com/atharvaajmera/Plenum/releases/latest/download/updater.json"
       ],
-      "pubkey": "UPDATE_PUBKEY_LATER"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEI2NUQzNzY3ODlFOTkxNDMKUldSRGtlbUpaemRkdG9hY1IxcnByR2JwdlA1L0h3NlRuVzZOT0tsWmgrRVRuVHA2d3kwVFVPbW4K"
     }
   },
   "bundle": {

@@ -23,4 +23,13 @@ Thumbs.db
 # temp downloads folder
 Downloads
 
+# Private keys and release secrets
+*.pem
+*.keystore
+*.jks
+*.key
+*.key.pub
+key.properties
+
+
 
