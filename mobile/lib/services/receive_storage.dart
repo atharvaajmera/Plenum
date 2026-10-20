@@ -31,7 +31,19 @@ class ReceiveStorage {
   /// Returns the directory received files should be written to: the
   /// app-specific external dir on Android (user-browsable under
   /// Android/data, survives without any permission), else app documents.
-  static Future<String> outputDir() async {
+  static Future<String> outputDir({String? customDir}) async {
+    if (customDir != null && customDir.trim().isNotEmpty) {
+      final dir = Directory(customDir.trim());
+      if (!await dir.exists()) {
+        try {
+          await dir.create(recursive: true);
+        } catch (_) {}
+      }
+      if (await dir.exists()) {
+        return dir.path;
+      }
+    }
+
     if (Platform.isAndroid) {
       final external = await getExternalStorageDirectory();
       if (external != null) {

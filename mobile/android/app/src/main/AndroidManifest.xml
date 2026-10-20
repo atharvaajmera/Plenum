@@ -7,6 +7,10 @@
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
     <uses-permission android:name="android.permission.CAMERA"/>
     <uses-permission android:name="android.permission.VIBRATE"/>
+    <!-- Foreground service permissions for background file transfers -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <!-- Legacy storage permission for Android 9 and below, where the
          Downloads export is a direct file copy. Android 10+ uses MediaStore
          and needs no storage permission at all (scoped storage). -->
@@ -16,6 +20,10 @@
         android:label="Plenum"
         android:name="${applicationName}"
         android:icon="@mipmap/launcher_icon">
+        <service
+            android:name=".TransferForegroundService"
+            android:foregroundServiceType="dataSync"
+            android:exported="false" />
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -36,6 +44,29 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+
+            <!-- ACTION_SEND for single file sharing (e.g. from Gallery, Files) -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+
+            <!-- ACTION_SEND_MULTIPLE for batch file sharing -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+
+            <!-- VIEW for content:// URIs -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="content" />
+                <data android:mimeType="*/*" />
             </intent-filter>
         </activity>
         <!-- Don't delete the meta-data below.

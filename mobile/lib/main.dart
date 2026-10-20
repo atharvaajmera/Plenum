@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:mobile/src/rust/frb_generated.dart';
@@ -9,6 +10,7 @@ import 'theme.dart';
 
 import 'package:provider/provider.dart';
 import 'services/settings_service.dart';
+import 'services/share_intent_handler.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -53,11 +55,37 @@ class MainScreen extends StatefulWidget {
 class _MainScreenState extends State<MainScreen> {
   int _selectedIndex = 0;
   DateTime? _lastBackPressTime;
+  StreamSubscription<List<SharedFile>>? _shareIntentSub;
 
   static const List<Widget> _screens = <Widget>[
     SendScreen(),
     ReceiveScreen(),
   ];
+
+  @override
+  void initState() {
+    super.initState();
+    _shareIntentSub = ShareIntentHandler.getSharingStream().listen((files) {
+      if (files.isNotEmpty && mounted) {
+        setState(() {
+          _selectedIndex = 0;
+        });
+      }
+    });
+    ShareIntentHandler.getInitialSharing().then((files) {
+      if (files.isNotEmpty && mounted) {
+        setState(() {
+          _selectedIndex = 0;
+        });
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _shareIntentSub?.cancel();
+    super.dispose();
+  }
 
   void _onItemTapped(int index) {
     setState(() {
