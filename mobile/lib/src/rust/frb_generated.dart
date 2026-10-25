@@ -64,7 +64,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.12.0';
 
   @override
-  int get rustContentHash => 1517368112;
+  int get rustContentHash => -1784738929;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -84,11 +84,17 @@ abstract class RustLibApi extends BaseApi {
 
   List<String> crateApiPlenumApiGetLocalIpsSync();
 
+  List<String> crateApiPlenumApiGetRelayFallbackIpsSync();
+
   void crateApiPlenumApiInitApp();
 
   void crateApiPlenumApiRespondToIncoming({
     required String sessionToken,
     required bool accept,
+  });
+
+  void crateApiPlenumApiSetRelayFallbackIpsSync({
+    required List<String> fallbackIps,
   });
 
   Stream<String> crateApiPlenumApiStartReceiveUnified({
@@ -218,12 +224,37 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "get_local_ips_sync", argNames: []);
 
   @override
-  void crateApiPlenumApiInitApp() {
+  List<String> crateApiPlenumApiGetRelayFallbackIpsSync() {
     return handler.executeSync(
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 5)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_list_String,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiPlenumApiGetRelayFallbackIpsSyncConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiPlenumApiGetRelayFallbackIpsSyncConstMeta =>
+      const TaskConstMeta(
+        debugName: "get_relay_fallback_ips_sync",
+        argNames: [],
+      );
+
+  @override
+  void crateApiPlenumApiInitApp() {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 6)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
@@ -250,7 +281,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(sessionToken, serializer);
           sse_encode_bool(accept, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 6)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 7)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
@@ -267,6 +298,34 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(
         debugName: "respond_to_incoming",
         argNames: ["sessionToken", "accept"],
+      );
+
+  @override
+  void crateApiPlenumApiSetRelayFallbackIpsSync({
+    required List<String> fallbackIps,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_list_String(fallbackIps, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 8)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiPlenumApiSetRelayFallbackIpsSyncConstMeta,
+        argValues: [fallbackIps],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiPlenumApiSetRelayFallbackIpsSyncConstMeta =>
+      const TaskConstMeta(
+        debugName: "set_relay_fallback_ips_sync",
+        argNames: ["fallbackIps"],
       );
 
   @override
@@ -304,7 +363,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 7,
+              funcId: 9,
               port: port_,
             );
           },
@@ -382,7 +441,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 8,
+              funcId: 10,
               port: port_,
             );
           },

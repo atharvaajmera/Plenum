@@ -63,6 +63,17 @@ pub fn respond_to_incoming(session_token: String, accept: bool) {
 #[frb(sync)]
 pub fn init_app() {
     flutter_rust_bridge::setup_default_user_utils();
+    plenum::rtc::resolve::spawn_remote_config_fetch();
+}
+
+#[frb(sync)]
+pub fn set_relay_fallback_ips_sync(fallback_ips: Vec<String>) {
+    plenum::rtc::resolve::set_custom_fallback_ips(fallback_ips);
+}
+
+#[frb(sync)]
+pub fn get_relay_fallback_ips_sync() -> Vec<String> {
+    plenum::rtc::resolve::get_fallback_ips()
 }
 
 fn parse_target_paths(file_path: &str) -> (PathBuf, Vec<PathBuf>) {

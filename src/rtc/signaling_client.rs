@@ -45,14 +45,14 @@ async fn connect_ws_with_fallback(
     relay_url: &str,
     diag_tx: &std::sync::mpsc::Sender<String>,
     role: &'static str,
-) -> Result<(WsStream, bool), RtcError> {
+) -> Result<(WsStream, Option<String>), RtcError> {
     let direct_error = match tokio::time::timeout(
         WS_CONNECT_ATTEMPT_TIMEOUT,
         tokio_tungstenite::connect_async(relay_url),
     )
     .await
     {
-        Ok(Ok((ws_stream, _response))) => return Ok((ws_stream, false)),
+        Ok(Ok((ws_stream, _response))) => return Ok((ws_stream, None)),
         Ok(Err(error)) => error.to_string(),
         Err(_) => format!("timed out after {}s", WS_CONNECT_ATTEMPT_TIMEOUT.as_secs()),
     };
@@ -61,11 +61,6 @@ async fn connect_ws_with_fallback(
         return Err(RtcError::WebSocket(direct_error));
     }
 
-    let _ = diag_tx.send(format!(
-        "DIAG {role}: relay connect via DNS failed ({direct_error}); retrying via fallback IP {}",
-        crate::rtc::resolve::RELAY_FALLBACK_IP
-    ));
-
     let parsed = url::Url::parse(relay_url)
         .map_err(|error| RtcError::WebSocket(format!("invalid relay url: {error}")))?;
     let port = parsed.port().unwrap_or(match parsed.scheme() {
@@ -73,39 +68,61 @@ async fn connect_ws_with_fallback(
         _ => 80,
     });
 
-    let tcp = tokio::time::timeout(
-        WS_CONNECT_ATTEMPT_TIMEOUT,
-        tokio::net::TcpStream::connect((crate::rtc::resolve::RELAY_FALLBACK_IP, port)),
-    )
-    .await
-    .map_err(|_| {
-        RtcError::WebSocket(format!(
-            "relay connect failed via DNS ({direct_error}) and fallback IP TCP connect timed out"
-        ))
-    })?
-    .map_err(|error| {
-        RtcError::WebSocket(format!(
-            "relay connect failed via DNS ({direct_error}) and via fallback IP: {error}"
-        ))
-    })?;
-    let _ = tcp.set_nodelay(true);
+    let candidates = crate::rtc::resolve::get_fallback_ips();
+    let mut last_error = String::new();
 
-    let (ws_stream, _response) = tokio::time::timeout(
-        WS_CONNECT_ATTEMPT_TIMEOUT,
-        tokio_tungstenite::client_async_tls_with_config(relay_url, tcp, None, None),
-    )
-    .await
-    .map_err(|_| RtcError::WebSocket("fallback IP TLS/WebSocket handshake timed out".into()))?
-    .map_err(|error| {
-        RtcError::WebSocket(format!(
-            "fallback IP TLS/WebSocket handshake failed: {error}"
-        ))
-    })?;
+    for ip in &candidates {
+        let _ = diag_tx.send(format!(
+            "DIAG {role}: relay connect via DNS failed ({direct_error}); retrying via fallback IP {ip}"
+        ));
 
-    let _ = diag_tx.send(format!(
-        "DIAG {role}: connected to relay via fallback IP (DNS sinkhole workaround active)"
-    ));
-    Ok((ws_stream, true))
+        let tcp_res = tokio::time::timeout(
+            WS_CONNECT_ATTEMPT_TIMEOUT,
+            tokio::net::TcpStream::connect((ip.as_str(), port)),
+        )
+        .await;
+
+        let tcp = match tcp_res {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(err)) => {
+                last_error = format!("TCP connect to {ip}:{port} failed: {err}");
+                continue;
+            }
+            Err(_) => {
+                last_error = format!("TCP connect to {ip}:{port} timed out");
+                continue;
+            }
+        };
+
+        let _ = tcp.set_nodelay(true);
+
+        let ws_res = tokio::time::timeout(
+            WS_CONNECT_ATTEMPT_TIMEOUT,
+            tokio_tungstenite::client_async_tls_with_config(relay_url, tcp, None, None),
+        )
+        .await;
+
+        match ws_res {
+            Ok(Ok((ws_stream, _response))) => {
+                let _ = diag_tx.send(format!(
+                    "DIAG {role}: connected to relay via fallback IP {ip} (DNS sinkhole workaround active)"
+                ));
+                return Ok((ws_stream, Some(ip.clone())));
+            }
+            Ok(Err(err)) => {
+                last_error = format!("TLS/WebSocket handshake with {ip} failed: {err}");
+                continue;
+            }
+            Err(_) => {
+                last_error = format!("TLS/WebSocket handshake with {ip} timed out");
+                continue;
+            }
+        }
+    }
+
+    Err(RtcError::WebSocket(format!(
+        "relay connect failed via DNS ({direct_error}) and all fallback IPs failed. Last error: {last_error}"
+    )))
 }
 
 pub struct ConnectedChannel {
@@ -460,9 +477,9 @@ pub async fn run_offerer(
         connect_ws_with_fallback(relay_url, &diag_tx, "offerer").await?;
     // Fallback active means DNS for the relay host is broken on this network;
     // the ICE agent resolves STUN/TURN hostnames through that same DNS, so
-    // point them at the IP too.
-    let ice_servers = if used_fallback_ip {
-        crate::rtc::resolve::rewrite_ice_servers_to_fallback_ip(&ice_servers)
+    // point them at the working IP too.
+    let ice_servers = if let Some(ref target_ip) = used_fallback_ip {
+        crate::rtc::resolve::rewrite_ice_servers_to_target_ip(&ice_servers, target_ip)
     } else {
         ice_servers
     };
@@ -656,9 +673,9 @@ pub async fn run_answerer(
         connect_ws_with_fallback(relay_url, &diag_tx, "answerer").await?;
     // Fallback active means DNS for the relay host is broken on this network;
     // the ICE agent resolves STUN/TURN hostnames through that same DNS, so
-    // point them at the IP too.
-    let ice_servers = if used_fallback_ip {
-        crate::rtc::resolve::rewrite_ice_servers_to_fallback_ip(&ice_servers)
+    // point them at the working IP too.
+    let ice_servers = if let Some(ref target_ip) = used_fallback_ip {
+        crate::rtc::resolve::rewrite_ice_servers_to_target_ip(&ice_servers, target_ip)
     } else {
         ice_servers
     };

@@ -147,6 +147,16 @@ pub async fn fetch_turn_credentials_command(
 }
 
 #[tauri::command]
+pub fn set_relay_fallback_ips_command(fallback_ips: Vec<String>) {
+    plenum::rtc::resolve::set_custom_fallback_ips(fallback_ips);
+}
+
+#[tauri::command]
+pub fn get_relay_fallback_ips_command() -> Vec<String> {
+    plenum::rtc::resolve::get_fallback_ips()
+}
+
+#[tauri::command]
 pub async fn send_file_unified_command(
     app: AppHandle,
     mut request: SendUnifiedRequest,

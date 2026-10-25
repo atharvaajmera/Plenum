@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "version": 1,
+  "relay_host": "relay.plenumonline.me",
+  "relay_server_url": "wss://relay.plenumonline.me/ws",
+  "fallback_ips": [
+    "13.232.226.146"
+  ],
+  "updated_at": "2026-10-19T00:00:00Z"
+}

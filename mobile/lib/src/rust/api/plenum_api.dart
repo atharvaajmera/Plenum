@@ -24,6 +24,14 @@ void respondToIncoming({required String sessionToken, required bool accept}) =>
 
 void initApp() => RustLib.instance.api.crateApiPlenumApiInitApp();
 
+void setRelayFallbackIpsSync({required List<String> fallbackIps}) => RustLib
+    .instance
+    .api
+    .crateApiPlenumApiSetRelayFallbackIpsSync(fallbackIps: fallbackIps);
+
+List<String> getRelayFallbackIpsSync() =>
+    RustLib.instance.api.crateApiPlenumApiGetRelayFallbackIpsSync();
+
 /// Generates a display-ready room code for internet transfers, without
 /// blocking on a relay-server connection (so the receive UI can show it
 /// immediately).

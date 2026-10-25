@@ -25,6 +25,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             commands::cleanup_old_transfer_logs(app.handle());
+            plenum::rtc::resolve::spawn_remote_config_fetch();
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -34,6 +35,8 @@ pub fn run() {
             commands::generate_room_code_command,
             commands::generate_peer_id_command,
             commands::fetch_turn_credentials_command,
+            commands::set_relay_fallback_ips_command,
+            commands::get_relay_fallback_ips_command,
             commands::respond_to_incoming_command,
             commands::cancel_session_command,
             commands::send_file_unified_command,

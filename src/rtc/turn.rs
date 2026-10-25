@@ -2,7 +2,7 @@
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
-use crate::rtc::resolve::{RELAY_FALLBACK_IP, RELAY_HOST, fallback_applies};
+use crate::rtc::resolve::{RELAY_HOST, fallback_applies, get_fallback_ips};
 use crate::signaling::IceServer;
 
 const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
@@ -58,13 +58,21 @@ pub async fn fetch_turn_credentials(relay_server_url: &str, peer_id: &str) -> Op
     if !fallback_applies(relay_server_url) {
         return None;
     }
-    let ip: IpAddr = RELAY_FALLBACK_IP.parse().ok()?;
-    let client = reqwest::Client::builder()
-        .timeout(FETCH_TIMEOUT)
-        .resolve(RELAY_HOST, SocketAddr::new(ip, 443))
-        .build()
-        .ok()?;
-    fetch_with_client(client, url).await
+
+    for ip_str in get_fallback_ips() {
+        if let Ok(ip) = ip_str.parse::<IpAddr>() {
+            if let Ok(client) = reqwest::Client::builder()
+                .timeout(FETCH_TIMEOUT)
+                .resolve(RELAY_HOST, SocketAddr::new(ip, 443))
+                .build()
+            {
+                if let Some(server) = fetch_with_client(client, url.clone()).await {
+                    return Some(server);
+                }
+            }
+        }
+    }
+    None
 }
 
 pub fn fetch_turn_credentials_blocking(relay_server_url: &str, peer_id: &str) -> Option<IceServer> {
