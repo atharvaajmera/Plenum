@@ -41,10 +41,28 @@ pub struct SecureTransport<T: Transport> {
     recv_aad: &'static [u8],
     send_direction: &'static str,
     recv_direction: &'static str,
+    sas: String,
+    is_pinned: bool,
 }
 
 impl<T: Transport> SecureTransport<T> {
+    pub fn sas(&self) -> &str {
+        &self.sas
+    }
+
+    pub fn is_pinned(&self) -> bool {
+        self.is_pinned
+    }
+
     pub fn connect(inner: T, pairing_secret: Option<&str>) -> TransportResult<Self> {
+        Self::connect_pinned(inner, pairing_secret, None)
+    }
+
+    pub fn connect_pinned(
+        inner: T,
+        pairing_secret: Option<&str>,
+        pinned_server_public: Option<&[u8; 32]>,
+    ) -> TransportResult<Self> {
         let secret = StaticSecret::random_from_rng(OsRng);
         let public = PublicKey::from(&secret);
         let mut client_nonce = [0_u8; 32];
@@ -67,6 +85,15 @@ impl<T: Transport> SecureTransport<T> {
             return Err(handshake_error("incompatible or malformed secure LAN peer"));
         }
 
+        let server_public = public_key(&server_hello[9..41])?;
+        let mut is_pinned = false;
+        if let Some(pinned) = pinned_server_public {
+            if server_public.as_bytes() != pinned {
+                return Err(handshake_error("receiver public key does not match pinned QR key"));
+            }
+            is_pinned = true;
+        }
+
         let server_requires_pin = server_hello[73] == 1;
         if server_requires_pin && pairing_secret.is_none() {
             return Err(handshake_error("receiver requires a pairing PIN"));
@@ -82,12 +109,19 @@ impl<T: Transport> SecureTransport<T> {
         )?;
         inner.send(&make_proof(proof_secret, b"client", &transcript)?)?;
 
-        let server_public = public_key(&server_hello[9..41])?;
         let shared = secret.diffie_hellman(&server_public);
-        Self::from_shared(inner, shared.as_bytes(), &transcript, true)
+        Self::from_shared(inner, shared.as_bytes(), &transcript, true, is_pinned)
     }
 
     pub fn accept(inner: T, pairing_secret: Option<&str>) -> TransportResult<Self> {
+        Self::accept_with_secret(inner, pairing_secret, None)
+    }
+
+    pub fn accept_with_secret(
+        inner: T,
+        pairing_secret: Option<&str>,
+        identity_secret: Option<&[u8; 32]>,
+    ) -> TransportResult<Self> {
         let mut inner = inner;
         let client_hello = recv_handshake(&mut inner)?;
         if client_hello.len() != HELLO_LEN
@@ -100,7 +134,11 @@ impl<T: Transport> SecureTransport<T> {
             return Err(handshake_error("pairing PIN required"));
         }
 
-        let secret = StaticSecret::random_from_rng(OsRng);
+        let secret = if let Some(bytes) = identity_secret {
+            StaticSecret::from(*bytes)
+        } else {
+            StaticSecret::random_from_rng(OsRng)
+        };
         let public = PublicKey::from(&secret);
         let mut server_nonce = [0_u8; 32];
         OsRng.fill_bytes(&mut server_nonce);
@@ -124,7 +162,7 @@ impl<T: Transport> SecureTransport<T> {
 
         let client_public = public_key(&client_hello[9..41])?;
         let shared = secret.diffie_hellman(&client_public);
-        Self::from_shared(inner, shared.as_bytes(), &transcript, false)
+        Self::from_shared(inner, shared.as_bytes(), &transcript, false, false)
     }
 
     fn from_shared(
@@ -132,6 +170,7 @@ impl<T: Transport> SecureTransport<T> {
         shared: &[u8; 32],
         transcript: &[u8; 32],
         client: bool,
+        is_pinned: bool,
     ) -> TransportResult<Self> {
         let hkdf = Hkdf::<Sha256>::new(Some(transcript), shared);
         let mut client_key = [0_u8; 32];
@@ -160,6 +199,7 @@ impl<T: Transport> SecureTransport<T> {
                 DIRECTION_CLIENT_TO_SERVER,
             )
         };
+        let sas = compute_sas(transcript);
         Ok(Self {
             inner,
             sender: SessionCipher::new(&send_key).map_err(security_error)?,
@@ -170,6 +210,8 @@ impl<T: Transport> SecureTransport<T> {
             recv_aad,
             send_direction,
             recv_direction,
+            sas,
+            is_pinned,
         })
     }
 }
@@ -251,6 +293,12 @@ impl<T: Transport> Transport for SecureTransport<T> {
     }
     fn is_relayed(&self) -> Option<bool> {
         self.inner.is_relayed()
+    }
+    fn sas_code(&self) -> Option<String> {
+        Some(self.sas.clone())
+    }
+    fn is_pinned(&self) -> bool {
+        self.is_pinned
     }
 }
 
@@ -390,3 +438,13 @@ fn secure_frame_error(message: impl Into<String>) -> TransportError {
         message: message.into(),
     }
 }
+
+pub fn compute_sas(transcript: &[u8; 32]) -> String {
+    let hkdf = Hkdf::<Sha256>::new(None, transcript);
+    let mut okm = [0_u8; 4];
+    hkdf.expand(b"plenum-sas", &mut okm)
+        .expect("valid okm length for hkdf expand");
+    let num = u32::from_be_bytes(okm) % 1_000_000;
+    format!("{:06}", num)
+}
+

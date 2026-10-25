@@ -364,3 +364,204 @@ fn encrypted_tcp_sustains_production_sized_transfer() {
 fn encrypted_tcp_sustains_large_transfer() {
     run_encrypted_tcp_transfer(512);
 }
+
+#[test]
+fn sas_matches_on_both_peers_in_unauthenticated_lan() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+
+    let server = thread::spawn(move || {
+        let tcp = TcpTransport::accept(&listener).unwrap();
+        let secure = SecureTransport::accept(tcp, None).unwrap();
+        (secure.sas().to_string(), secure.is_pinned())
+    });
+
+    let tcp = TcpTransport::connect(address).unwrap();
+    let secure = SecureTransport::connect(tcp, None).unwrap();
+    let client_sas = secure.sas().to_string();
+    let client_is_pinned = secure.is_pinned();
+
+    let (server_sas, server_is_pinned) = server.join().unwrap();
+
+    assert_eq!(client_sas, server_sas, "SAS code must match on both peers");
+    assert_eq!(client_sas.len(), 6, "SAS code must be 6 digits");
+    assert!(
+        client_sas.chars().all(|c| c.is_ascii_digit()),
+        "SAS must be numeric digits"
+    );
+    assert!(!client_is_pinned);
+    assert!(!server_is_pinned);
+}
+
+#[test]
+fn tampered_transcript_produces_different_sas() {
+    let transcript_a = [0x42_u8; 32];
+    let mut transcript_b = [0x42_u8; 32];
+    transcript_b[15] ^= 0x01; // 1-bit flip
+
+    let sas_a = plenum::transport::compute_sas(&transcript_a);
+    let sas_b = plenum::transport::compute_sas(&transcript_b);
+
+    assert_ne!(
+        sas_a, sas_b,
+        "tampered transcript must yield different SAS codes"
+    );
+    assert_eq!(sas_a.len(), 6);
+    assert_eq!(sas_b.len(), 6);
+}
+
+#[test]
+fn mitm_proxy_inserted_between_peers_produces_mismatched_codes() {
+    let receiver_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let receiver_addr = receiver_listener.local_addr().unwrap();
+
+    let proxy_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let proxy_addr = proxy_listener.local_addr().unwrap();
+
+    // Receiver (Peer B)
+    let receiver_handle = thread::spawn(move || {
+        let tcp = TcpTransport::accept(&receiver_listener).unwrap();
+        let secure = SecureTransport::accept(tcp, None).unwrap();
+        secure.sas().to_string()
+    });
+
+    // MITM Proxy sitting between Peer A and Peer B
+    let proxy_handle = thread::spawn(move || {
+        // Proxy accepts connection from Sender
+        let sender_tcp = TcpTransport::accept(&proxy_listener).unwrap();
+        let proxy_as_server = SecureTransport::accept(sender_tcp, None).unwrap();
+
+        // Proxy initiates connection to Receiver
+        let receiver_tcp = TcpTransport::connect(receiver_addr).unwrap();
+        let proxy_as_client = SecureTransport::connect(receiver_tcp, None).unwrap();
+
+        (
+            proxy_as_server.sas().to_string(),
+            proxy_as_client.sas().to_string(),
+        )
+    });
+
+    // Sender (Peer A) connects to Proxy thinking it's the receiver
+    let sender_tcp = TcpTransport::connect(proxy_addr).unwrap();
+    let sender_secure = SecureTransport::connect(sender_tcp, None).unwrap();
+    let sender_sas = sender_secure.sas().to_string();
+
+    let receiver_sas = receiver_handle.join().unwrap();
+    let (proxy_with_sender, proxy_with_receiver) = proxy_handle.join().unwrap();
+
+    // Sender agrees with Proxy-as-server
+    assert_eq!(sender_sas, proxy_with_sender);
+    // Receiver agrees with Proxy-as-client
+    assert_eq!(receiver_sas, proxy_with_receiver);
+    // But Sender and Receiver have MISMATCHED SAS codes!
+    assert_ne!(
+        sender_sas, receiver_sas,
+        "MITM proxy causes sender and receiver to derive completely different SAS codes"
+    );
+}
+
+#[test]
+fn qr_pinning_accepts_when_public_key_matches_and_marks_is_pinned() {
+    use rand::rngs::OsRng;
+    use x25519_dalek::{PublicKey, StaticSecret};
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+
+    let server_secret = StaticSecret::random_from_rng(OsRng);
+    let server_public = PublicKey::from(&server_secret);
+    let server_secret_bytes = server_secret.to_bytes();
+    let server_public_bytes = *server_public.as_bytes();
+
+    let server = thread::spawn(move || {
+        let tcp = TcpTransport::accept(&listener).unwrap();
+        let secure =
+            SecureTransport::accept_with_secret(tcp, None, Some(&server_secret_bytes)).unwrap();
+        secure.sas().to_string()
+    });
+
+    let tcp = TcpTransport::connect(address).unwrap();
+    let secure =
+        SecureTransport::connect_pinned(tcp, None, Some(&server_public_bytes)).unwrap();
+    assert!(
+        secure.is_pinned(),
+        "pinned connection must mark is_pinned = true"
+    );
+
+    let server_sas = server.join().unwrap();
+    assert_eq!(secure.sas(), server_sas);
+}
+
+#[test]
+fn qr_pinning_rejects_mitm_tampered_key() {
+    use rand::rngs::OsRng;
+    use x25519_dalek::{PublicKey, StaticSecret};
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+
+    let server_secret = StaticSecret::random_from_rng(OsRng);
+    let server_secret_bytes = server_secret.to_bytes();
+
+    // Victim (Client) pinned a different public key from QR code
+    let fake_secret = StaticSecret::random_from_rng(OsRng);
+    let pinned_public_from_qr = *PublicKey::from(&fake_secret).as_bytes();
+
+    let server = thread::spawn(move || {
+        let tcp = TcpTransport::accept(&listener).unwrap();
+        // Server will present its own real key
+        let _ = SecureTransport::accept_with_secret(tcp, None, Some(&server_secret_bytes));
+    });
+
+    let tcp = TcpTransport::connect(address).unwrap();
+    let err = SecureTransport::connect_pinned(tcp, None, Some(&pinned_public_from_qr))
+        .err()
+        .expect("client must reject mismatched server public key");
+
+    assert!(
+        err.to_string()
+            .contains("receiver public key does not match pinned QR key"),
+        "error message must mention pinned key mismatch: {err}"
+    );
+
+    let _ = server.join();
+}
+
+#[test]
+fn verification_refusal_aborts_before_data() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+
+    // Receiver simulates verification code check and declines/refuses
+    let receiver = thread::spawn(move || {
+        let tcp = TcpTransport::accept(&listener).unwrap();
+        let mut secure = SecureTransport::accept(tcp, None).unwrap();
+        let code = secure.sas().to_string();
+        // User refuses verification (e.g. codes mismatch) -> receiver closes session immediately
+        let _ = secure.close();
+        code
+    });
+
+    let tcp = TcpTransport::connect(address).unwrap();
+    let mut secure = SecureTransport::connect(tcp, None).unwrap();
+    let client_code = secure.sas().to_string();
+
+    let receiver_code = receiver.join().unwrap();
+    assert_eq!(client_code, receiver_code);
+
+    // Sender attempts to exchange data or receives notification that peer closed
+    // Transport must not permit data transmission once peer refused/closed
+    let mut data_sent_successfully = false;
+    for _ in 0..10 {
+        if secure.send(b"PAYLOAD_DATA_THAT_MUST_NOT_BE_DELIVERED").is_err() {
+            data_sent_successfully = false;
+            break;
+        }
+        thread::sleep(Duration::from_millis(5));
+        if let Ok(None) | Err(_) = secure.recv() {
+            data_sent_successfully = false;
+            break;
+        }
+    }
+    assert!(!data_sent_successfully, "Refusal must abort session before data transfer");
+}

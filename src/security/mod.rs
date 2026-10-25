@@ -9,12 +9,10 @@
 
 pub mod cipher;
 pub mod error;
-pub mod pairing;
 pub mod replay;
 pub mod session;
 
 pub use cipher::{EncryptedFrame, SessionCipher, SessionKey};
 pub use error::SecurityError;
-pub use pairing::AuthenticatedPairingToken;
 pub use replay::ReplayProtector;
 pub use session::SessionId;

@@ -13,21 +13,43 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::app::error::AppError;
 use crate::app::types::{
     AcceptDecision, BenchmarkEvent, BenchmarkIterationSummary, BenchmarkRequest, BenchmarkSummary,
-    ConnectionState, CorePermissions, DiscoverRequest, DiscoveryEvent, DiscoverySummary, EventSink,
-    LogLevel, PermissionKind, PlenumEvent, ReceiveRemoteRequest, ReceiveRequest,
-    ReceiveUnifiedRequest, SelectedPath, SendRemoteRequest, SendRequest, SendUnifiedRequest,
-    SessionControl, TransferDirection, TransferEvent, TransferMode, TransferSummary,
+    ConnectionState, CorePermissions, EventSink, LogLevel, PermissionKind, PlenumEvent,
+    ReceiveUnifiedRequest, SelectedPath, SendUnifiedRequest, SessionControl, TransferDirection,
+    TransferEvent, TransferMode, TransferSummary,
 };
-use crate::discovery::{Beacon, PairingToken};
+use crate::app::packaging::{prepare_payload, PreparedPayload};
+use crate::discovery::PairingToken;
 use crate::flow::{ReceiverWindow, SenderWindow};
 use crate::protocol::{Packet, PacketType, encode_packet, parse_packet};
 use crate::rtc::RtcTransport;
-use crate::signaling::{IceServer, RoutedSignal, SignalMessage, SignalingState};
+use crate::signaling::IceServer;
 use crate::stream::{ResumeCheckpoint, chunk_bytes};
 use crate::transport::{
     MemoryTransport, MemoryTransportConfig, SecureTransport, TcpTransport, Transport,
     TransportError,
 };
+use rand::RngCore;
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        use std::fmt::Write;
+        let _ = write!(s, "{:02x}", b);
+    }
+    s
+}
+
+fn hex_decode(s: &str) -> Option<[u8; 32]> {
+    let s = s.trim();
+    if s.len() != 64 {
+        return None;
+    }
+    let mut bytes = [0u8; 32];
+    for i in 0..32 {
+        bytes[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(bytes)
+}
 
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -66,7 +88,6 @@ const RELAY_RETRY_DELAY_RECEIVE: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Default)]
 pub struct PlenumCore {
-    signaling: SignalingState,
     control: SessionControl,
 }
 
@@ -79,93 +100,43 @@ impl PlenumCore {
         self.control.clone()
     }
 
-    pub fn send_file<S: EventSink>(
+    fn send_file_remote<S: EventSink>(
         &mut self,
-        request: SendRequest,
-        sink: &mut S,
-    ) -> Result<crate::app::types::TransferSummary, AppError> {
-        validate_send_request(&request)?;
-        let mut file = File::open(&request.file_path)?;
-        let file_size = file.metadata()?.len();
-        let file_name = request
-            .file_path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
-
-        let address = match request.address.clone() {
-            Some(addr) => addr,
-            None => {
-                sink.emit(PlenumEvent::Transfer(TransferEvent::StateChanged {
-                    direction: TransferDirection::Send,
-                    state: ConnectionState::Discovering,
-                    peer: None,
-                }));
-                let discovery = self.discover_peer(
-                    DiscoverRequest {
-                        token: request.discovery_token.clone(),
-                        timeout_secs: 10,
-                        permissions: request.permissions.clone(),
-                    },
-                    sink,
-                )?;
-                discovery.address
-            }
-        };
-
-        sink.emit(PlenumEvent::Transfer(TransferEvent::StateChanged {
-            direction: TransferDirection::Send,
-            state: ConnectionState::Connecting,
-            peer: Some(address.clone()),
-        }));
-        let transport = TcpTransport::connect(&address)?;
-        let mut transport = SecureTransport::connect(
-            transport,
-            request
-                .discovery_token
-                .as_deref()
-                .filter(|token| !token.trim().is_empty()),
-        )?;
-
-        sink.emit(PlenumEvent::Transfer(TransferEvent::StateChanged {
-            direction: TransferDirection::Send,
-            state: ConnectionState::Connected,
-            peer: Some(address.clone()),
-        }));
-
-        run_send_transfer(
-            &mut transport,
-            sink,
-            &mut file,
-            file_size,
-            &file_name,
-            &request.options,
-            Some(address),
-            &self.control,
-            request.device_name.as_deref(),
-        )
-    }
-
-    pub fn send_file_remote<S: EventSink>(
-        &mut self,
-        mut request: SendRemoteRequest,
+        relay_server_url: String,
+        session_id: String,
+        my_peer_id: String,
+        mut ice_servers: Vec<IceServer>,
+        connect_timeout_secs: u64,
+        device_name: Option<String>,
+        options: &crate::app::types::TransferOptions,
+        payload: &PreparedPayload,
         sink: &mut S,
     ) -> Result<TransferSummary, AppError> {
-        validate_send_remote_request(&request)?;
-        request.options.chunk_size = request.options.chunk_size.min(RTC_MAX_CHUNK_SIZE);
+        let mut transfer_options = options.clone();
+        transfer_options.chunk_size = transfer_options.chunk_size.min(RTC_MAX_CHUNK_SIZE);
         ensure_turn_server(
-            &mut request.ice_servers,
-            &request.relay_server_url,
-            &request.my_peer_id,
+            &mut ice_servers,
+            &relay_server_url,
+            &my_peer_id,
             sink,
         );
 
-        let first = self.send_file_remote_attempt(&request, sink, false);
+        let first = self.send_file_remote_attempt(
+            &relay_server_url,
+            &session_id,
+            &my_peer_id,
+            &ice_servers,
+            connect_timeout_secs,
+            device_name.as_deref(),
+            &transfer_options,
+            payload,
+            sink,
+            false,
+        );
         let Err(error) = &first else {
             return first;
         };
-        if !should_retry_via_relay(error, &request.ice_servers) || self.control.is_cancelled() {
+        if !should_retry_via_relay(error, &ice_servers) || self.control.is_cancelled() {
             return first;
         }
         sink.emit(PlenumEvent::Log {
@@ -178,36 +149,49 @@ impl PlenumCore {
         if self.control.is_cancelled() {
             return first;
         }
-        self.send_file_remote_attempt(&request, sink, true)
+        self.send_file_remote_attempt(
+            &relay_server_url,
+            &session_id,
+            &my_peer_id,
+            &ice_servers,
+            connect_timeout_secs,
+            device_name.as_deref(),
+            &transfer_options,
+            payload,
+            sink,
+            true,
+        )
     }
 
     fn send_file_remote_attempt<S: EventSink>(
         &mut self,
-        request: &SendRemoteRequest,
+        relay_server_url: &str,
+        session_id: &str,
+        my_peer_id: &str,
+        ice_servers: &[IceServer],
+        connect_timeout_secs: u64,
+        device_name: Option<&str>,
+        options: &crate::app::types::TransferOptions,
+        payload: &PreparedPayload,
         sink: &mut S,
         force_relay: bool,
     ) -> Result<TransferSummary, AppError> {
-        let mut file = File::open(&request.file_path)?;
-        let file_size = file.metadata()?.len();
-        let file_name = request
-            .file_path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
+        let mut file = File::open(payload.file_path())?;
+        let file_size = payload.file_size();
+        let file_name = payload.file_name().to_string();
 
         sink.emit(PlenumEvent::Transfer(TransferEvent::StateChanged {
             direction: TransferDirection::Send,
             state: ConnectionState::SignalingConnected,
-            peer: Some(request.session_id.clone()),
+            peer: Some(session_id.to_string()),
         }));
 
         let mut transport = RtcTransport::connect_as_offerer_cancellable(
-            &request.relay_server_url,
-            &request.session_id,
-            &request.my_peer_id,
-            request.ice_servers.clone(),
-            Duration::from_secs(request.connect_timeout_secs),
+            relay_server_url,
+            session_id,
+            my_peer_id,
+            ice_servers.to_vec(),
+            Duration::from_secs(connect_timeout_secs),
             force_relay,
             self.control.cancel_flag(),
         )
@@ -216,7 +200,7 @@ impl PlenumCore {
         sink.emit(PlenumEvent::Transfer(TransferEvent::StateChanged {
             direction: TransferDirection::Send,
             state: ConnectionState::Connected,
-            peer: Some(request.session_id.clone()),
+            peer: Some(session_id.to_string()),
         }));
 
         run_send_transfer(
@@ -225,10 +209,10 @@ impl PlenumCore {
             &mut file,
             file_size,
             &file_name,
-            &request.options,
-            Some(request.session_id.clone()),
+            options,
+            Some(session_id.to_string()),
             &self.control,
-            request.device_name.as_deref(),
+            device_name,
         )
     }
 
@@ -238,14 +222,11 @@ impl PlenumCore {
         sink: &mut S,
     ) -> Result<TransferSummary, AppError> {
         validate_send_unified_request(&request)?;
-        let mut file = File::open(&request.file_path)?;
-        let file_size = file.metadata()?.len();
-        let file_name = request
-            .file_path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
+        let paths = request.resolved_paths();
+        let payload = prepare_payload(&paths, &self.control, sink)?;
+        let mut file = File::open(payload.file_path())?;
+        let file_size = payload.file_size();
+        let file_name = payload.file_name().to_string();
 
         let mut lan_connected_transport: Option<(SecureTransport<TcpTransport>, String)> = None;
 
@@ -256,6 +237,12 @@ impl PlenumCore {
                 state: ConnectionState::Connecting,
                 peer: None,
             }));
+
+            let pinned_key = request
+                .payload
+                .public_key
+                .as_deref()
+                .and_then(hex_decode);
 
             for ip in &request.payload.lan_ips {
                 if self.control.is_cancelled() {
@@ -270,9 +257,10 @@ impl PlenumCore {
                     ) {
                         let _ = stream.set_nonblocking(false);
                         if let Ok(tcp) = TcpTransport::from_stream(stream) {
-                            if let Ok(sec) = SecureTransport::connect(
+                            if let Ok(sec) = SecureTransport::connect_pinned(
                                 tcp,
                                 request.payload.pin.as_deref().filter(|p| !p.trim().is_empty()),
+                                pinned_key.as_ref(),
                             ) {
                                 lan_connected_transport = Some((sec, addr_str));
                                 break;
@@ -297,6 +285,14 @@ impl PlenumCore {
                 state: ConnectionState::Connected,
                 peer: Some(peer_addr.clone()),
             }));
+
+            let has_pin = request.payload.pin.as_ref().is_some_and(|p| !p.trim().is_empty());
+            let is_pinned = transport.is_pinned();
+            if !has_pin && !is_pinned && request.options.require_verification {
+                if let Some(sas) = transport.sas_code() {
+                    sink.emit(PlenumEvent::Transfer(TransferEvent::VerificationCode(sas)));
+                }
+            }
 
             let send_result = run_send_transfer(
                 &mut transport,
@@ -338,175 +334,58 @@ impl PlenumCore {
             description: format!("Internet connection via room {}", request.payload.room_code),
         }));
 
-        let remote_req = SendRemoteRequest {
-            file_path: request.file_path,
-            relay_server_url: request.relay_server_url,
-            session_id: request.payload.room_code,
-            my_peer_id: request.my_peer_id,
-            ice_servers: request.ice_servers,
-            connect_timeout_secs: request.connect_timeout_secs,
-            device_name: request.device_name,
-            permissions: request.permissions,
-            options: request.options,
-        };
-
-        self.send_file_remote(remote_req, sink)
+        self.send_file_remote(
+            request.relay_server_url,
+            request.payload.room_code,
+            request.my_peer_id,
+            request.ice_servers,
+            request.connect_timeout_secs,
+            request.device_name,
+            &request.options,
+            &payload,
+            sink,
+        )
     }
 
-    pub fn receive_file<S: EventSink>(
+    fn receive_file_remote<S: EventSink>(
         &mut self,
-        request: ReceiveRequest,
-        sink: &mut S,
-    ) -> Result<crate::app::types::TransferSummary, AppError> {
-        validate_receive_request(&request)?;
-        create_dir_all(&request.output_dir)?;
-        let control = self.control.clone();
-        control.reset_decision();
-
-        let listener = TcpListener::bind(format!("0.0.0.0:{}", request.port))?;
-        listener.set_nonblocking(true)?;
-        let actual_port = listener.local_addr()?.port();
-
-        sink.emit(PlenumEvent::Transfer(TransferEvent::StateChanged {
-            direction: TransferDirection::Receive,
-            state: ConnectionState::Listening,
-            peer: Some(format!("0.0.0.0:{}", actual_port)),
-        }));
-
-        let token = PairingToken::generate();
-        let broadcast_handle = if request.announce_on_lan {
-            let beacon = Beacon::new();
-            let handle = beacon.broadcast(
-                &token,
-                actual_port,
-                request.device_name.clone(),
-                request.require_pin,
-            )?;
-            sink.emit(PlenumEvent::Discovery(DiscoveryEvent::BroadcastStarted {
-                token: token.code().to_string(),
-                port: actual_port,
-            }));
-            Some(handle)
-        } else {
-            None
-        };
-
-        let stop_flag = Arc::new(AtomicBool::new(false));
-        let broadcast_thread = if let Some(handle) = broadcast_handle {
-            let flag = stop_flag.clone();
-            Some(thread::spawn(move || {
-                while !flag.load(Ordering::Relaxed) {
-                    let _ = handle.send_once();
-                    thread::sleep(handle.interval());
-                }
-            }))
-        } else {
-            None
-        };
-
-        let result =
-            self.accept_and_receive(&request, &listener, &token, &control, &stop_flag, sink);
-
-        stop_flag.store(true, Ordering::Relaxed);
-        if let Some(thread) = broadcast_thread {
-            let _ = thread.join();
-        }
-
-        result
-    }
-
-    fn accept_and_receive<S: EventSink>(
-        &mut self,
-        request: &ReceiveRequest,
-        listener: &TcpListener,
-        token: &PairingToken,
-        control: &SessionControl,
-        announce_stop: &AtomicBool,
-        sink: &mut S,
-    ) -> Result<crate::app::types::TransferSummary, AppError> {
-        loop {
-            let stream = loop {
-                if control.is_cancelled() {
-                    sink.emit(PlenumEvent::Transfer(TransferEvent::Cancelled {
-                        direction: TransferDirection::Receive,
-                    }));
-                    return Err(AppError::Cancelled);
-                }
-                match listener.accept() {
-                    Ok((stream, _)) => break stream,
-                    Err(error)
-                        if matches!(
-                            error.kind(),
-                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                        ) =>
-                    {
-                        thread::sleep(Duration::from_millis(25));
-                    }
-                    Err(error) => return Err(error.into()),
-                }
-            };
-            stream.set_nonblocking(false)?;
-
-            let peer = stream
-                .peer_addr()
-                .map(|addr| addr.to_string())
-                .unwrap_or_else(|_| "unknown".to_string());
-            let transport = TcpTransport::from_stream(stream)?;
-            let mut transport = match SecureTransport::accept(
-                transport,
-                request.require_pin.then_some(token.code()),
-            ) {
-                Ok(transport) => transport,
-                Err(error) if request.require_pin => {
-                    sink.emit(PlenumEvent::Log {
-                        level: LogLevel::Warn,
-                        message: format!("rejected secure connection from {peer}: {error}"),
-                    });
-                    continue;
-                }
-                Err(error) => return Err(error.into()),
-            };
-
-            sink.emit(PlenumEvent::Transfer(TransferEvent::StateChanged {
-                direction: TransferDirection::Receive,
-                state: ConnectionState::Connected,
-                peer: Some(peer.clone()),
-            }));
-
-            announce_stop.store(true, Ordering::Relaxed);
-
-            return run_receive_transfer(
-                &mut transport,
-                sink,
-                &request.output_dir,
-                &request.options,
-                peer,
-                control,
-                request.auto_accept,
-                request.device_name.as_deref(),
-            );
-        }
-    }
-
-    pub fn receive_file_remote<S: EventSink>(
-        &mut self,
-        mut request: ReceiveRemoteRequest,
+        output_dir: PathBuf,
+        relay_server_url: String,
+        session_id: String,
+        my_peer_id: String,
+        mut ice_servers: Vec<IceServer>,
+        connect_timeout_secs: u64,
+        device_name: Option<String>,
+        auto_accept: bool,
+        options: &crate::app::types::TransferOptions,
         sink: &mut S,
     ) -> Result<TransferSummary, AppError> {
-        validate_receive_remote_request(&request)?;
-        request.options.chunk_size = request.options.chunk_size.min(RTC_MAX_CHUNK_SIZE);
+        let mut transfer_options = options.clone();
+        transfer_options.chunk_size = transfer_options.chunk_size.min(RTC_MAX_CHUNK_SIZE);
         ensure_turn_server(
-            &mut request.ice_servers,
-            &request.relay_server_url,
-            &request.my_peer_id,
+            &mut ice_servers,
+            &relay_server_url,
+            &my_peer_id,
             sink,
         );
 
-        let first = self.receive_file_remote_attempt(&request, sink, false);
+        let first = self.receive_file_remote_attempt(
+            &output_dir,
+            &relay_server_url,
+            &session_id,
+            &my_peer_id,
+            &ice_servers,
+            connect_timeout_secs,
+            device_name.as_deref(),
+            auto_accept,
+            &transfer_options,
+            sink,
+            false,
+        );
         let Err(error) = &first else {
             return first;
         };
-        if !should_retry_via_relay(error, &request.ice_servers) || self.control.is_cancelled() {
+        if !should_retry_via_relay(error, &ice_servers) || self.control.is_cancelled() {
             return first;
         }
         sink.emit(PlenumEvent::Log {
@@ -519,31 +398,51 @@ impl PlenumCore {
         if self.control.is_cancelled() {
             return first;
         }
-        self.receive_file_remote_attempt(&request, sink, true)
+        self.receive_file_remote_attempt(
+            &output_dir,
+            &relay_server_url,
+            &session_id,
+            &my_peer_id,
+            &ice_servers,
+            connect_timeout_secs,
+            device_name.as_deref(),
+            auto_accept,
+            &transfer_options,
+            sink,
+            true,
+        )
     }
 
     fn receive_file_remote_attempt<S: EventSink>(
         &mut self,
-        request: &ReceiveRemoteRequest,
+        output_dir: &Path,
+        relay_server_url: &str,
+        session_id: &str,
+        my_peer_id: &str,
+        ice_servers: &[IceServer],
+        connect_timeout_secs: u64,
+        device_name: Option<&str>,
+        auto_accept: bool,
+        options: &crate::app::types::TransferOptions,
         sink: &mut S,
         force_relay: bool,
     ) -> Result<TransferSummary, AppError> {
-        create_dir_all(&request.output_dir)?;
+        create_dir_all(output_dir)?;
         let control = self.control.clone();
         control.reset_decision();
 
         sink.emit(PlenumEvent::Transfer(TransferEvent::StateChanged {
             direction: TransferDirection::Receive,
             state: ConnectionState::SignalingConnected,
-            peer: Some(request.session_id.clone()),
+            peer: Some(session_id.to_string()),
         }));
 
         let mut transport = RtcTransport::connect_as_answerer_cancellable(
-            &request.relay_server_url,
-            &request.session_id,
-            &request.my_peer_id,
-            request.ice_servers.clone(),
-            Duration::from_secs(request.connect_timeout_secs),
+            relay_server_url,
+            session_id,
+            my_peer_id,
+            ice_servers.to_vec(),
+            Duration::from_secs(connect_timeout_secs),
             force_relay,
             control.cancel_flag(),
         )
@@ -552,18 +451,18 @@ impl PlenumCore {
         sink.emit(PlenumEvent::Transfer(TransferEvent::StateChanged {
             direction: TransferDirection::Receive,
             state: ConnectionState::Connected,
-            peer: Some(request.session_id.clone()),
+            peer: Some(session_id.to_string()),
         }));
 
         run_receive_transfer(
             &mut transport,
             sink,
-            &request.output_dir,
-            &request.options,
-            request.session_id.clone(),
+            output_dir,
+            options,
+            session_id.to_string(),
             &control,
-            request.auto_accept,
-            request.device_name.as_deref(),
+            auto_accept,
+            device_name,
         )
     }
 
@@ -584,30 +483,16 @@ impl PlenumCore {
         let token = PairingToken::generate();
         let pin_code = token.code().to_string();
 
-        let broadcast_handle = if request.announce_on_lan {
-            let beacon = Beacon::new();
-            match beacon.broadcast(
-                &token,
-                actual_port,
-                request.device_name.clone(),
-                request.require_pin,
-            ) {
-                Ok(handle) => Some(handle),
-                Err(e) => {
-                    sink.emit(PlenumEvent::Log {
-                        level: LogLevel::Warn,
-                        message: format!("Failed to start LAN discovery beacon: {e}"),
-                    });
-                    None
-                }
-            }
-        } else {
-            None
-        };
+        let mut secret_bytes = [0_u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut secret_bytes);
+        let secret = x25519_dalek::StaticSecret::from(secret_bytes);
+        let public = x25519_dalek::PublicKey::from(&secret);
+        let public_key_hex = hex_encode(public.as_bytes());
 
-        sink.emit(PlenumEvent::Discovery(DiscoveryEvent::BroadcastStarted {
-            token: pin_code.clone(),
+        sink.emit(PlenumEvent::Transfer(TransferEvent::Listening {
             port: actual_port,
+            pin: Some(pin_code.clone()),
+            public_key: Some(public_key_hex),
         }));
 
         sink.emit(PlenumEvent::Transfer(TransferEvent::StateChanged {
@@ -616,20 +501,6 @@ impl PlenumCore {
             peer: Some(format!("0.0.0.0:{}", actual_port)),
         }));
 
-        let beacon_cancel = Arc::new(AtomicBool::new(false));
-        let broadcast_thread = if let Some(handle) = broadcast_handle {
-            let flag = beacon_cancel.clone();
-            Some(thread::spawn(move || {
-                while !flag.load(Ordering::Relaxed) {
-                    let _ = handle.send_once();
-                    thread::sleep(handle.interval());
-                }
-            }))
-        } else {
-            None
-        };
-
-        request.options.chunk_size = request.options.chunk_size.min(RTC_MAX_CHUNK_SIZE);
         ensure_turn_server(
             &mut request.ice_servers,
             &request.relay_server_url,
@@ -653,6 +524,7 @@ impl PlenumCore {
         let control_cancel_lan = control.cancel_flag();
         let require_pin = request.require_pin;
         let expected_pin = pin_code.clone();
+        let identity_secret = secret_bytes;
 
         let lan_thread = thread::spawn(move || {
             while !lan_cancel_clone.load(Ordering::Relaxed) && !control_cancel_lan.load(Ordering::Relaxed) {
@@ -661,9 +533,10 @@ impl PlenumCore {
                         let _ = stream.set_nonblocking(false);
                         let peer_str = addr.to_string();
                         if let Ok(tcp) = TcpTransport::from_stream(stream) {
-                            if let Ok(sec) = SecureTransport::accept(
+                            if let Ok(sec) = SecureTransport::accept_with_secret(
                                 tcp,
                                 require_pin.then_some(expected_pin.as_str()),
+                                Some(&identity_secret),
                             ) {
                                 let _ = tx_lan.send(IncomingUnified::Local(Box::new(sec), peer_str));
                                 break;
@@ -723,12 +596,8 @@ impl PlenumCore {
             if control.is_cancelled() {
                 lan_cancel.store(true, Ordering::Relaxed);
                 rtc_cancel.store(true, Ordering::Relaxed);
-                beacon_cancel.store(true, Ordering::Relaxed);
                 let _ = lan_thread.join();
                 let _ = rtc_thread.join();
-                if let Some(thread) = broadcast_thread {
-                    let _ = thread.join();
-                }
                 sink.emit(PlenumEvent::Transfer(TransferEvent::Cancelled {
                     direction: TransferDirection::Receive,
                 }));
@@ -741,12 +610,8 @@ impl PlenumCore {
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                     lan_cancel.store(true, Ordering::Relaxed);
                     rtc_cancel.store(true, Ordering::Relaxed);
-                    beacon_cancel.store(true, Ordering::Relaxed);
                     let _ = lan_thread.join();
                     let _ = rtc_thread.join();
-                    if let Some(thread) = broadcast_thread {
-                        let _ = thread.join();
-                    }
                     return Err(AppError::Io(std::io::Error::new(
                         std::io::ErrorKind::ConnectionAborted,
                         "All connection listeners terminated without connection",
@@ -755,15 +620,11 @@ impl PlenumCore {
             }
         };
 
-        // Disarm and clean up the inactive path and discovery beacon
+        // Disarm and clean up the inactive path
         lan_cancel.store(true, Ordering::Relaxed);
         rtc_cancel.store(true, Ordering::Relaxed);
-        beacon_cancel.store(true, Ordering::Relaxed);
         let _ = lan_thread.join();
         let _ = rtc_thread.join();
-        if let Some(thread) = broadcast_thread {
-            let _ = thread.join();
-        }
 
         match incoming {
             IncomingUnified::Local(mut transport, peer) => {
@@ -777,6 +638,12 @@ impl PlenumCore {
                     state: ConnectionState::Connected,
                     peer: Some(peer.clone()),
                 }));
+                let has_pin = request.require_pin;
+                if !has_pin && request.options.require_verification {
+                    if let Some(sas) = transport.sas_code() {
+                        sink.emit(PlenumEvent::Transfer(TransferEvent::VerificationCode(sas)));
+                    }
+                }
                 let res = run_receive_transfer(
                     &mut transport,
                     sink,
@@ -807,19 +674,18 @@ impl PlenumCore {
                             },
                             description: format!("Failing over to Internet via room {}", request.session_id),
                         }));
-                        let remote_req = ReceiveRemoteRequest {
-                            output_dir: request.output_dir,
-                            relay_server_url: request.relay_server_url,
-                            session_id: request.session_id,
-                            my_peer_id: request.my_peer_id,
-                            ice_servers: request.ice_servers,
-                            connect_timeout_secs: request.connect_timeout_secs,
-                            auto_accept: true,
-                            device_name: request.device_name,
-                            permissions: request.permissions,
-                            options: request.options,
-                        };
-                        self.receive_file_remote(remote_req, sink)
+                        self.receive_file_remote(
+                            request.output_dir,
+                            request.relay_server_url,
+                            request.session_id,
+                            request.my_peer_id,
+                            request.ice_servers,
+                            request.connect_timeout_secs,
+                            request.device_name,
+                            true,
+                            &request.options,
+                            sink,
+                        )
                     }
                     Err(e) => Err(e),
                 }
@@ -839,11 +705,13 @@ impl PlenumCore {
                     state: ConnectionState::Connected,
                     peer: Some(room.clone()),
                 }));
+                let mut internet_options = request.options.clone();
+                internet_options.chunk_size = internet_options.chunk_size.min(RTC_MAX_CHUNK_SIZE);
                 run_receive_transfer(
                     &mut transport,
                     sink,
                     &request.output_dir,
-                    &request.options,
+                    &internet_options,
                     room,
                     &control,
                     request.auto_accept,
@@ -853,50 +721,7 @@ impl PlenumCore {
         }
     }
 
-    pub fn discover_peer<S: EventSink>(
-        &mut self,
-        request: DiscoverRequest,
-        sink: &mut S,
-    ) -> Result<DiscoverySummary, AppError> {
-        validate_discover_request(&request)?;
-        sink.emit(PlenumEvent::Discovery(DiscoveryEvent::SearchStarted {
-            token: request.token.clone(),
-            timeout_secs: request.timeout_secs,
-        }));
 
-        let beacon = Beacon::with_config(crate::discovery::beacon::BeaconConfig {
-            discover_timeout: Duration::from_secs(request.timeout_secs),
-            ..Default::default()
-        });
-
-        let result = match request.token.as_deref() {
-            Some(token) => beacon.discover_with_token(token),
-            None => beacon.discover(),
-        };
-
-        match result {
-            Ok(announcement) => {
-                let address = announcement.tcp_addr().to_string();
-                let summary = DiscoverySummary {
-                    hostname: announcement.hostname,
-                    address,
-                    token: announcement.token,
-                    pin_required: announcement.pin_required,
-                };
-                sink.emit(PlenumEvent::Discovery(DiscoveryEvent::PeerFound(
-                    summary.clone(),
-                )));
-                Ok(summary)
-            }
-            Err(crate::discovery::DiscoveryError::NoPeersFound) => {
-                sink.emit(PlenumEvent::Discovery(DiscoveryEvent::PeerNotFound));
-                Err(AppError::from(
-                    crate::discovery::DiscoveryError::NoPeersFound,
-                ))
-            }
-            Err(error) => Err(error.into()),
-        }
-    }
 
     pub fn benchmark<S: EventSink>(
         &mut self,
@@ -1020,91 +845,6 @@ impl PlenumCore {
         Ok(summary)
     }
 
-    pub fn handle_signal(&mut self, message: SignalMessage) -> Result<Vec<RoutedSignal>, AppError> {
-        Ok(self.signaling.handle(message)?)
-    }
-
-    pub fn session_of(&self, peer_id: &str) -> Option<String> {
-        self.signaling.session_of(peer_id).map(str::to_string)
-    }
-
-    pub fn peers_in_session(&self, session_id: &str) -> Option<Vec<String>> {
-        self.signaling.peers_in_session(session_id)
-    }
-}
-
-fn validate_send_request(request: &SendRequest) -> Result<(), AppError> {
-    require_permission(
-        &request.permissions,
-        PermissionKind::FileSystemRead,
-        "send_file",
-    )?;
-    require_permission(
-        &request.permissions,
-        PermissionKind::LocalNetwork,
-        "send_file",
-    )?;
-    validate_transfer_options(&request.options)?;
-    Ok(())
-}
-
-fn validate_receive_request(request: &ReceiveRequest) -> Result<(), AppError> {
-    require_permission(
-        &request.permissions,
-        PermissionKind::FileSystemWrite,
-        "receive_file",
-    )?;
-    require_permission(
-        &request.permissions,
-        PermissionKind::LocalNetwork,
-        "receive_file",
-    )?;
-    validate_transfer_options(&request.options)?;
-    Ok(())
-}
-
-fn validate_discover_request(request: &DiscoverRequest) -> Result<(), AppError> {
-    require_permission(
-        &request.permissions,
-        PermissionKind::LocalNetwork,
-        "discover_peer",
-    )?;
-    if request.timeout_secs == 0 {
-        return Err(AppError::InvalidRequest(
-            "discover timeout must be greater than zero".into(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_send_remote_request(request: &SendRemoteRequest) -> Result<(), AppError> {
-    require_permission(
-        &request.permissions,
-        PermissionKind::FileSystemRead,
-        "send_file_remote",
-    )?;
-    validate_remote_request_fields(
-        &request.relay_server_url,
-        &request.session_id,
-        request.connect_timeout_secs,
-    )?;
-    validate_transfer_options(&request.options)?;
-    Ok(())
-}
-
-fn validate_receive_remote_request(request: &ReceiveRemoteRequest) -> Result<(), AppError> {
-    require_permission(
-        &request.permissions,
-        PermissionKind::FileSystemWrite,
-        "receive_file_remote",
-    )?;
-    validate_remote_request_fields(
-        &request.relay_server_url,
-        &request.session_id,
-        request.connect_timeout_secs,
-    )?;
-    validate_transfer_options(&request.options)?;
-    Ok(())
 }
 
 fn validate_send_unified_request(request: &SendUnifiedRequest) -> Result<(), AppError> {
@@ -1128,13 +868,11 @@ fn validate_receive_unified_request(request: &ReceiveUnifiedRequest) -> Result<(
         PermissionKind::FileSystemWrite,
         "receive_file_unified",
     )?;
-    if request.announce_on_lan {
-        require_permission(
-            &request.permissions,
-            PermissionKind::LocalNetwork,
-            "receive_file_unified",
-        )?;
-    }
+    require_permission(
+        &request.permissions,
+        PermissionKind::LocalNetwork,
+        "receive_file_unified",
+    )?;
     validate_remote_request_fields(
         &request.relay_server_url,
         &request.session_id,
@@ -2242,7 +1980,11 @@ fn run_receive_transfer<T: Transport, S: EventSink>(
                     peer: Some(peer_label.clone()),
                     sender_name: sender_name.clone(),
                 }));
-                if !auto_accept {
+                let requires_manual_verify = options.require_verification
+                    && transport.sas_code().is_some()
+                    && !transport.is_pinned();
+                let should_prompt = !auto_accept || requires_manual_verify;
+                if should_prompt {
                     let deadline = Instant::now() + APPROVAL_TIMEOUT;
                     loop {
                         if control.is_cancelled() {
@@ -2920,6 +2662,7 @@ mod tests {
             chunk_size,
             window_size,
             timeout_ticks: 15_000,
+            require_verification: true,
         };
 
         run_streaming_send_loop(

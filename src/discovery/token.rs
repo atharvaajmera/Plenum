@@ -6,8 +6,6 @@
 
 use std::time::{Duration, Instant};
 
-use crate::discovery::DiscoveryError;
-
 const TOKEN_LEN: usize = 6;
 const DEFAULT_TTL: Duration = Duration::from_secs(300); // 5 minutes
 
@@ -68,47 +66,22 @@ impl PairingToken {
     }
 
     /// Validates that this token matches another code and has not expired.
-    pub fn verify(&self, other: &str) -> Result<(), DiscoveryError> {
-        if !self.is_valid() {
-            return Err(DiscoveryError::TokenExpired);
-        }
-        if self.code != other {
-            return Err(DiscoveryError::TokenMismatch);
-        }
-        Ok(())
+    pub fn verify(&self, other: &str) -> bool {
+        self.is_valid() && self.code == other
     }
 }
 
-/// Generates a random alphanumeric string of the given length using basic
-/// entropy from the system clock. This is not cryptographically secure but
-/// sufficient for short-lived local pairing codes.
+/// Generates a cryptographically secure random alphanumeric string of the
+/// given length using the operating system's CSPRNG (OsRng).
 fn random_alphanumeric(len: usize) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    use std::time::SystemTime;
-
+    use rand::Rng;
     const CHARSET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
-    let mut hasher = DefaultHasher::new();
-    SystemTime::now().hash(&mut hasher);
-    std::thread::current().id().hash(&mut hasher);
-
-    // Mix in the address of a stack variable for extra entropy
-    let stack_var = 0u8;
-    let ptr = &stack_var as *const u8 as usize;
-    ptr.hash(&mut hasher);
-
-    let mut result = String::with_capacity(len);
-    let mut state = hasher.finish();
-
-    for _ in 0..len {
-        let idx = (state as usize) % CHARSET.len();
-        result.push(CHARSET[idx] as char);
-        // Simple xorshift-style mixing
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-    }
-
-    result
+    let mut rng = rand::rngs::OsRng;
+    (0..len)
+        .map(|_| {
+            let idx = rng.gen_range(0..CHARSET.len());
+            CHARSET[idx] as char
+        })
+        .collect()
 }

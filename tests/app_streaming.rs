@@ -6,8 +6,8 @@ use std::thread;
 use std::time::Duration;
 
 use plenum::app::{
-    ConnectionState, CorePermissions, PlenumCore, PlenumEvent, ReceiveRequest, SendRequest,
-    TransferDirection, TransferEvent, TransferMode, TransferOptions,
+    CorePermissions, PlenumCore, PlenumEvent, ReceiveUnifiedRequest, SendUnifiedRequest,
+    TransferDirection, TransferEvent, TransferMode, TransferOptions, UnifiedSharePayload,
 };
 
 fn unique_dir(label: &str) -> PathBuf {
@@ -46,11 +46,15 @@ fn transfer_roundtrip(
         let mut sink = move |event: PlenumEvent| {
             let _ = receiver_events.send(event);
         };
-        core.receive_file(
-            ReceiveRequest {
+        core.receive_file_unified(
+            ReceiveUnifiedRequest {
                 port: 0,
                 output_dir: receiver_output_dir,
-                announce_on_lan: false,
+                relay_server_url: "ws://127.0.0.1:1/ws".into(),
+                session_id: "STREAM-TEST".into(),
+                my_peer_id: "recv-peer".into(),
+                ice_servers: Vec::new(),
+                connect_timeout_secs: 5,
                 device_name: Some("test-receiver".into()),
                 require_pin: false,
                 auto_accept: true,
@@ -62,23 +66,14 @@ fn transfer_roundtrip(
     });
 
     // The receiver reports its auto-assigned port through the Listening event.
-    let port = loop {
+    let (port, pin) = loop {
         let event = event_rx
             .recv_timeout(Duration::from_secs(10))
             .expect("receiver should report a listening port");
-        if let PlenumEvent::Transfer(TransferEvent::StateChanged {
-            state: ConnectionState::Listening,
-            peer: Some(peer),
-            ..
-        }) = &event
-        {
-            let port = peer
-                .rsplit(':')
-                .next()
-                .and_then(|raw| raw.parse::<u16>().ok())
-                .expect("listening peer should end in a port");
+        if let PlenumEvent::Transfer(TransferEvent::Listening { port, pin, .. }) = &event {
+            let res = (*port, pin.clone());
             let _ = event_tx.send(event);
-            break port;
+            break res;
         }
         let _ = event_tx.send(event);
     };
@@ -88,11 +83,21 @@ fn transfer_roundtrip(
     let mut sender_sink = move |event: PlenumEvent| {
         let _ = sender_events.send(event);
     };
-    let send_result = sender_core.send_file(
-        SendRequest {
-            file_path,
-            address: Some(format!("127.0.0.1:{port}")),
-            discovery_token: None,
+
+    let mut unified_payload = UnifiedSharePayload::new("STREAM-TEST");
+    unified_payload.lan_ips = vec!["127.0.0.1".into()];
+    unified_payload.port = port;
+    unified_payload.pin = pin;
+
+    let send_result = sender_core.send_file_unified(
+        SendUnifiedRequest {
+            file_path: file_path.clone(),
+            file_paths: vec![file_path],
+            payload: unified_payload,
+            relay_server_url: "ws://127.0.0.1:1/ws".into(),
+            my_peer_id: "send-peer".into(),
+            ice_servers: Vec::new(),
+            connect_timeout_secs: 5,
             device_name: Some("test-sender".into()),
             permissions: CorePermissions::full(),
             options,
@@ -143,6 +148,7 @@ fn lan_transfer_streams_large_file_with_cumulative_acks() {
             chunk_size: 256 * 1024,
             window_size: 64,
             timeout_ticks: 15_000,
+            require_verification: false,
         },
     );
 
@@ -162,6 +168,7 @@ fn lan_transfer_streams_small_file_via_finish_ack() {
             chunk_size: 32 * 1024,
             window_size: 64,
             timeout_ticks: 15_000,
+            require_verification: false,
         },
     );
 
@@ -205,11 +212,15 @@ fn lan_transfer_e2e_resumed_summary_correct_baseline() {
         let mut sink = move |event: PlenumEvent| {
             let _ = receiver_events.send(event);
         };
-        core.receive_file(
-            ReceiveRequest {
+        core.receive_file_unified(
+            ReceiveUnifiedRequest {
                 port: 0,
                 output_dir: receiver_output_dir,
-                announce_on_lan: false,
+                relay_server_url: "ws://127.0.0.1:1/ws".into(),
+                session_id: "RESUME-TEST".into(),
+                my_peer_id: "recv-peer".into(),
+                ice_servers: Vec::new(),
+                connect_timeout_secs: 5,
                 device_name: Some("test-receiver".into()),
                 require_pin: false,
                 auto_accept: true,
@@ -218,29 +229,21 @@ fn lan_transfer_e2e_resumed_summary_correct_baseline() {
                     chunk_size,
                     window_size: 64,
                     timeout_ticks: 15_000,
+            require_verification: false,
                 },
             },
             &mut sink,
         )
     });
 
-    let port = loop {
+    let (port, pin) = loop {
         let event = event_rx
             .recv_timeout(Duration::from_secs(10))
             .expect("receiver should report a listening port");
-        if let PlenumEvent::Transfer(TransferEvent::StateChanged {
-            state: ConnectionState::Listening,
-            peer: Some(peer),
-            ..
-        }) = &event
-        {
-            let port = peer
-                .rsplit(':')
-                .next()
-                .and_then(|raw| raw.parse::<u16>().ok())
-                .expect("listening peer should end in a port");
+        if let PlenumEvent::Transfer(TransferEvent::Listening { port, pin, .. }) = &event {
+            let res = (*port, pin.clone());
             let _ = event_tx.send(event);
-            break port;
+            break res;
         }
         let _ = event_tx.send(event);
     };
@@ -250,17 +253,28 @@ fn lan_transfer_e2e_resumed_summary_correct_baseline() {
     let mut sender_sink = move |event: PlenumEvent| {
         let _ = sender_events.send(event);
     };
-    let send_result = sender_core.send_file(
-        SendRequest {
-            file_path,
-            address: Some(format!("127.0.0.1:{port}")),
-            discovery_token: None,
+
+    let mut unified_payload = UnifiedSharePayload::new("RESUME-TEST");
+    unified_payload.lan_ips = vec!["127.0.0.1".into()];
+    unified_payload.port = port;
+    unified_payload.pin = pin;
+
+    let send_result = sender_core.send_file_unified(
+        SendUnifiedRequest {
+            file_path: file_path.clone(),
+            file_paths: vec![file_path],
+            payload: unified_payload,
+            relay_server_url: "ws://127.0.0.1:1/ws".into(),
+            my_peer_id: "send-peer".into(),
+            ice_servers: Vec::new(),
+            connect_timeout_secs: 5,
             device_name: Some("test-sender".into()),
             permissions: CorePermissions::full(),
             options: TransferOptions {
                 chunk_size,
                 window_size: 64,
                 timeout_ticks: 15_000,
+            require_verification: false,
             },
         },
         &mut sender_sink,
@@ -309,11 +323,15 @@ fn lan_transfer_cancellation_emits_cancelled_and_no_error_log() {
         let mut sink = move |event: PlenumEvent| {
             let _ = recv_tx.send(event);
         };
-        let _ = core.receive_file(
-            ReceiveRequest {
+        let _ = core.receive_file_unified(
+            ReceiveUnifiedRequest {
                 port: 0,
                 output_dir: receiver_output_dir,
-                announce_on_lan: false,
+                relay_server_url: "ws://127.0.0.1:1/ws".into(),
+                session_id: "CANCEL-TEST".into(),
+                my_peer_id: "recv-peer".into(),
+                ice_servers: Vec::new(),
+                connect_timeout_secs: 5,
                 device_name: Some("test-receiver".into()),
                 require_pin: false,
                 auto_accept: true,
@@ -322,28 +340,19 @@ fn lan_transfer_cancellation_emits_cancelled_and_no_error_log() {
                     chunk_size: 64 * 1024,
                     window_size: 16,
                     timeout_ticks: 15_000,
+            require_verification: false,
                 },
             },
             &mut sink,
         );
     });
 
-    let port = loop {
+    let (port, pin) = loop {
         let event = recv_rx
             .recv_timeout(Duration::from_secs(10))
             .expect("receiver should report a listening port");
-        if let PlenumEvent::Transfer(TransferEvent::StateChanged {
-            state: ConnectionState::Listening,
-            peer: Some(peer),
-            ..
-        }) = &event
-        {
-            let port = peer
-                .rsplit(':')
-                .next()
-                .and_then(|raw| raw.parse::<u16>().ok())
-                .expect("listening peer should end in a port");
-            break port;
+        if let PlenumEvent::Transfer(TransferEvent::Listening { port, pin, .. }) = &event {
+            break (*port, pin.clone());
         }
     };
 
@@ -353,18 +362,28 @@ fn lan_transfer_cancellation_emits_cancelled_and_no_error_log() {
         let _ = send_tx.send(event);
     };
 
+    let mut unified_payload = UnifiedSharePayload::new("CANCEL-TEST");
+    unified_payload.lan_ips = vec!["127.0.0.1".into()];
+    unified_payload.port = port;
+    unified_payload.pin = pin;
+
     let sender = thread::spawn(move || {
-        sender_core.send_file(
-            SendRequest {
-                file_path,
-                address: Some(format!("127.0.0.1:{port}")),
-                discovery_token: None,
+        sender_core.send_file_unified(
+            SendUnifiedRequest {
+                file_path: file_path.clone(),
+                file_paths: vec![file_path],
+                payload: unified_payload,
+                relay_server_url: "ws://127.0.0.1:1/ws".into(),
+                my_peer_id: "send-peer".into(),
+                ice_servers: Vec::new(),
+                connect_timeout_secs: 5,
                 device_name: Some("test-sender".into()),
                 permissions: CorePermissions::full(),
                 options: TransferOptions {
                     chunk_size: 64 * 1024,
                     window_size: 16,
                     timeout_ticks: 15_000,
+            require_verification: false,
                 },
             },
             &mut sender_sink,
@@ -452,11 +471,15 @@ fn lan_transfer_receiver_cancellation_saves_checkpoint() {
         let mut sink = move |event: PlenumEvent| {
             let _ = recv_tx.send(event);
         };
-        let _ = receiver_core.receive_file(
-            ReceiveRequest {
+        let _ = receiver_core.receive_file_unified(
+            ReceiveUnifiedRequest {
                 port: 0,
                 output_dir: receiver_output_dir,
-                announce_on_lan: false,
+                relay_server_url: "ws://127.0.0.1:1/ws".into(),
+                session_id: "RECV-CANCEL-TEST".into(),
+                my_peer_id: "recv-peer".into(),
+                ice_servers: Vec::new(),
+                connect_timeout_secs: 5,
                 device_name: Some("test-receiver".into()),
                 require_pin: false,
                 auto_accept: true,
@@ -465,28 +488,19 @@ fn lan_transfer_receiver_cancellation_saves_checkpoint() {
                     chunk_size: 64 * 1024,
                     window_size: 16,
                     timeout_ticks: 15_000,
+            require_verification: false,
                 },
             },
             &mut sink,
         );
     });
 
-    let port = loop {
+    let (port, pin) = loop {
         let event = recv_rx
             .recv_timeout(Duration::from_secs(10))
             .expect("receiver should report a listening port");
-        if let PlenumEvent::Transfer(TransferEvent::StateChanged {
-            state: ConnectionState::Listening,
-            peer: Some(peer),
-            ..
-        }) = &event
-        {
-            let port = peer
-                .rsplit(':')
-                .next()
-                .and_then(|raw| raw.parse::<u16>().ok())
-                .expect("listening peer should end in a port");
-            break port;
+        if let PlenumEvent::Transfer(TransferEvent::Listening { port, pin, .. }) = &event {
+            break (*port, pin.clone());
         }
     };
 
@@ -495,18 +509,28 @@ fn lan_transfer_receiver_cancellation_saves_checkpoint() {
         let _ = send_tx.send(event);
     };
 
+    let mut unified_payload = UnifiedSharePayload::new("RECV-CANCEL-TEST");
+    unified_payload.lan_ips = vec!["127.0.0.1".into()];
+    unified_payload.port = port;
+    unified_payload.pin = pin;
+
     let sender = thread::spawn(move || {
-        let _ = sender_core.send_file(
-            SendRequest {
-                file_path,
-                address: Some(format!("127.0.0.1:{port}")),
-                discovery_token: None,
+        let _ = sender_core.send_file_unified(
+            SendUnifiedRequest {
+                file_path: file_path.clone(),
+                file_paths: vec![file_path],
+                payload: unified_payload,
+                relay_server_url: "ws://127.0.0.1:1/ws".into(),
+                my_peer_id: "send-peer".into(),
+                ice_servers: Vec::new(),
+                connect_timeout_secs: 5,
                 device_name: Some("test-sender".into()),
                 permissions: CorePermissions::full(),
                 options: TransferOptions {
                     chunk_size: 64 * 1024,
                     window_size: 16,
                     timeout_ticks: 15_000,
+            require_verification: false,
                 },
             },
             &mut sender_sink,

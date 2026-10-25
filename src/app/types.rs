@@ -102,6 +102,8 @@ pub struct TransferOptions {
     pub chunk_size: usize,
     pub window_size: usize,
     pub timeout_ticks: u64,
+    #[serde(default = "default_true")]
+    pub require_verification: bool,
 }
 
 impl Default for TransferOptions {
@@ -110,76 +112,13 @@ impl Default for TransferOptions {
             chunk_size: 256 * 1024,
             window_size: 64,
             timeout_ticks: 15_000,
+            require_verification: true,
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SendRequest {
-    pub file_path: PathBuf,
-    pub address: Option<String>,
-    pub discovery_token: Option<String>,
-    #[serde(default)]
-    pub device_name: Option<String>,
-    pub permissions: CorePermissions,
-    pub options: TransferOptions,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReceiveRequest {
-    pub port: u16,
-    pub output_dir: PathBuf,
-    pub announce_on_lan: bool,
-    pub device_name: Option<String>,
-    #[serde(default)]
-    pub require_pin: bool,
-    #[serde(default = "default_true")]
-    pub auto_accept: bool,
-    pub permissions: CorePermissions,
-    pub options: TransferOptions,
-}
-
 fn default_true() -> bool {
     true
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DiscoverRequest {
-    pub token: Option<String>,
-    pub timeout_secs: u64,
-    pub permissions: CorePermissions,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SendRemoteRequest {
-    pub file_path: PathBuf,
-    pub relay_server_url: String,
-    pub session_id: String,
-    pub my_peer_id: String,
-    pub ice_servers: Vec<crate::signaling::IceServer>,
-    pub connect_timeout_secs: u64,
-    /// See [`SendRequest::device_name`].
-    #[serde(default)]
-    pub device_name: Option<String>,
-    pub permissions: CorePermissions,
-    pub options: TransferOptions,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReceiveRemoteRequest {
-    pub output_dir: PathBuf,
-    pub relay_server_url: String,
-    pub session_id: String,
-    pub my_peer_id: String,
-    pub ice_servers: Vec<crate::signaling::IceServer>,
-    pub connect_timeout_secs: u64,
-    /// See [`ReceiveRequest::auto_accept`].
-    #[serde(default = "default_true")]
-    pub auto_accept: bool,
-    #[serde(default)]
-    pub device_name: Option<String>,
-    pub permissions: CorePermissions,
-    pub options: TransferOptions,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -197,6 +136,8 @@ pub struct UnifiedSharePayload {
     pub peer_id: Option<String>,
     #[serde(default)]
     pub device_name: Option<String>,
+    #[serde(default)]
+    pub public_key: Option<String>,
 }
 
 fn default_version() -> u8 {
@@ -213,6 +154,7 @@ impl UnifiedSharePayload {
             pin: None,
             peer_id: None,
             device_name: None,
+            public_key: None,
         }
     }
 
@@ -256,6 +198,14 @@ impl UnifiedSharePayload {
                 ));
             }
         }
+        if let Some(pk) = &self.public_key {
+            if !pk.trim().is_empty() {
+                query.push_str(&format!(
+                    "&pk={}",
+                    url::form_urlencoded::byte_serialize(pk.trim().as_bytes()).collect::<String>()
+                ));
+            }
+        }
         format!("plenum://v1/connect?{query}")
     }
 
@@ -280,6 +230,7 @@ impl UnifiedSharePayload {
                 pin: None,
                 peer_id: None,
                 device_name: None,
+                public_key: None,
             };
 
             for (key, val) in url::form_urlencoded::parse(query_str.as_bytes()) {
@@ -322,6 +273,12 @@ impl UnifiedSharePayload {
                             payload.device_name = Some(n);
                         }
                     }
+                    "pk" | "pub" | "pub_key" | "public_key" | "key" => {
+                        let k = val.trim().to_string();
+                        if !k.is_empty() {
+                            payload.public_key = Some(k);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -351,7 +308,10 @@ pub enum SelectedPath {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SendUnifiedRequest {
+    #[serde(default)]
     pub file_path: PathBuf,
+    #[serde(default)]
+    pub file_paths: Vec<PathBuf>,
     pub payload: UnifiedSharePayload,
     pub relay_server_url: String,
     pub my_peer_id: String,
@@ -361,6 +321,18 @@ pub struct SendUnifiedRequest {
     pub device_name: Option<String>,
     pub permissions: CorePermissions,
     pub options: TransferOptions,
+}
+
+impl SendUnifiedRequest {
+    pub fn resolved_paths(&self) -> Vec<PathBuf> {
+        if !self.file_paths.is_empty() {
+            self.file_paths.clone()
+        } else if !self.file_path.as_os_str().is_empty() {
+            vec![self.file_path.clone()]
+        } else {
+            Vec::new()
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -377,8 +349,6 @@ pub struct ReceiveUnifiedRequest {
     pub require_pin: bool,
     #[serde(default = "default_true")]
     pub auto_accept: bool,
-    #[serde(default = "default_true")]
-    pub announce_on_lan: bool,
     #[serde(default)]
     pub device_name: Option<String>,
     pub permissions: CorePermissions,
@@ -469,15 +439,6 @@ pub struct TransferSummary {
     pub elapsed_ms: u128,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DiscoverySummary {
-    pub hostname: String,
-    pub address: String,
-    pub token: String,
-    #[serde(default)]
-    pub pin_required: bool,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BenchmarkIterationSummary {
     pub iteration: usize,
@@ -495,6 +456,13 @@ pub struct BenchmarkSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TransferEvent {
+    Listening {
+        port: u16,
+        pin: Option<String>,
+        #[serde(default)]
+        public_key: Option<String>,
+    },
+    VerificationCode(String),
     StateChanged {
         direction: TransferDirection,
         state: ConnectionState,
@@ -553,21 +521,13 @@ pub enum TransferEvent {
         next_sequence: u32,
         bytes_written: u64,
     },
+    Packaging {
+        current_item: usize,
+        total_items: usize,
+        current_name: String,
+        bytes_packaged: u64,
+    },
     Completed(TransferSummary),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum DiscoveryEvent {
-    SearchStarted {
-        token: Option<String>,
-        timeout_secs: u64,
-    },
-    BroadcastStarted {
-        token: String,
-        port: u16,
-    },
-    PeerFound(DiscoverySummary),
-    PeerNotFound,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -585,7 +545,6 @@ pub enum BenchmarkEvent {
 pub enum PlenumEvent {
     Log { level: LogLevel, message: String },
     Transfer(TransferEvent),
-    Discovery(DiscoveryEvent),
     Benchmark(BenchmarkEvent),
 }
 

@@ -1,8 +1,7 @@
 use std::time::Duration;
 
-use plenum::security::{
-    AuthenticatedPairingToken, ReplayProtector, SecurityError, SessionCipher, SessionId,
-};
+use plenum::discovery::PairingToken;
+use plenum::security::{ReplayProtector, SecurityError, SessionCipher, SessionId};
 
 #[test]
 fn generates_valid_secure_session_ids() {
@@ -23,54 +22,19 @@ fn rejects_invalid_session_id_format() {
 
 #[test]
 fn pairing_token_roundtrip_and_verification_succeeds() {
-    let secret = b"super-secret-shared-key";
-    let token = AuthenticatedPairingToken::issue(
-        secret,
-        SessionId::generate(),
-        "peer-a",
-        Duration::from_secs(60),
-    )
-    .expect("token should issue");
-
-    let json = token.to_json().expect("token should serialize");
-    let decoded = AuthenticatedPairingToken::from_json(&json).expect("token should deserialize");
-
-    decoded.verify(secret).expect("token should verify");
-    assert_eq!(decoded, token);
-}
-
-#[test]
-fn pairing_token_detects_tampering() {
-    let secret = b"super-secret-shared-key";
-    let mut token = AuthenticatedPairingToken::issue(
-        secret,
-        SessionId::generate(),
-        "peer-a",
-        Duration::from_secs(60),
-    )
-    .expect("token should issue");
-    token.peer_id = "peer-b".into();
-
-    let err = token
-        .verify(secret)
-        .expect_err("tampered token should fail");
-    assert_eq!(err, SecurityError::InvalidSignature);
+    let token = PairingToken::generate();
+    assert_eq!(token.code().len(), 6);
+    assert!(token.is_valid());
+    assert!(token.verify(token.code()));
+    assert!(!token.verify("WRONG"));
 }
 
 #[test]
 fn pairing_token_detects_expiry() {
-    let secret = b"super-secret-shared-key";
-    let mut token = AuthenticatedPairingToken::issue(
-        secret,
-        SessionId::generate(),
-        "peer-a",
-        Duration::from_secs(60),
-    )
-    .expect("token should issue");
-    token.expires_at_unix_secs = 0;
-
-    let err = token.verify(secret).expect_err("expired token should fail");
-    assert_eq!(err, SecurityError::TokenExpired);
+    let token = PairingToken::generate_with_ttl(Duration::from_millis(10));
+    std::thread::sleep(Duration::from_millis(25));
+    assert!(!token.is_valid());
+    assert!(!token.verify(token.code()));
 }
 
 #[test]

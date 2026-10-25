@@ -3,9 +3,9 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
 use plenum::app::{
-    BenchmarkEvent, BenchmarkRequest, ConnectionState, CorePermissions, DiscoverRequest,
-    DiscoveryEvent, LogLevel, PlenumCore, PlenumEvent, ReceiveRequest, SendRequest, TransferEvent,
-    TransferOptions,
+    BenchmarkEvent, BenchmarkRequest, ConnectionState, CorePermissions, LogLevel, PlenumCore,
+    PlenumEvent, ReceiveUnifiedRequest, SendUnifiedRequest, TransferEvent, TransferOptions,
+    UnifiedSharePayload, generate_peer_id, generate_room_code, get_local_ip_addresses,
 };
 
 #[derive(Parser)]
@@ -17,35 +17,36 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Send a file to a peer
+    /// Send a file or folder using unified transfer (LAN direct or WebRTC relay)
     Send {
-        /// Path to the file to send
+        /// Path to the file or directory to send
         file_path: PathBuf,
-        /// Address of the peer (e.g., 127.0.0.1:8080). If omitted, uses local discovery.
-        address: Option<String>,
-        /// Pairing token to match a specific receiver during discovery.
-        #[arg(short, long)]
-        token: Option<String>,
+        /// 9-character room code, connection URI (plenum://v1/connect?...), or direct IP:port
+        target: String,
+        /// Relay server URL
+        #[arg(long, default_value = "wss://relay.plenumonline.me/ws")]
+        relay_server: String,
+        /// Fallback IP(s) for the relay if DNS resolution fails (comma-separated or multiple flags)
+        #[arg(long, env = "PLENUM_RELAY_FALLBACK_IPS", value_delimiter = ',')]
+        relay_fallback_ips: Option<Vec<String>>,
     },
-    /// Receive a file from a peer
+    /// Receive a file using unified transfer
     Receive {
-        /// Port to listen on
+        /// Port to listen on (0 for random available port)
+        #[arg(short, long, default_value_t = 0)]
         port: u16,
         /// Directory to save the received file
         #[arg(short, long, default_value = ".")]
         output_dir: PathBuf,
-        /// Disable local network discovery broadcast
+        /// Require PIN for pairing
         #[arg(long, default_value_t = false)]
-        no_discover: bool,
-    },
-    /// Discover peers on the local network
-    Discover {
-        /// Pairing token to filter announcements
-        #[arg(short, long)]
-        token: Option<String>,
-        /// How long to listen for announcements (in seconds)
-        #[arg(short = 's', long, default_value_t = 10)]
-        timeout: u64,
+        require_pin: bool,
+        /// Relay server URL
+        #[arg(long, default_value = "wss://relay.plenumonline.me/ws")]
+        relay_server: String,
+        /// Fallback IP(s) for the relay if DNS resolution fails (comma-separated or multiple flags)
+        #[arg(long, env = "PLENUM_RELAY_FALLBACK_IPS", value_delimiter = ',')]
+        relay_fallback_ips: Option<Vec<String>>,
     },
     /// Benchmark the transfer engine without disk or network setup
     Benchmark {
@@ -86,40 +87,19 @@ impl plenum::app::EventSink for CliEventSink {
                 LogLevel::Error => eprintln!("{message}"),
                 _ => self.println(message),
             },
-            PlenumEvent::Discovery(event) => match event {
-                DiscoveryEvent::SearchStarted {
-                    token,
-                    timeout_secs,
-                } => {
-                    if let Some(token) = token {
-                        self.println(format!(
-                            "Scanning local network for Plenum peers ({}s timeout, token={})...",
-                            timeout_secs, token
-                        ));
-                    } else {
-                        self.println(format!(
-                            "Scanning local network for Plenum peers ({}s timeout)...",
-                            timeout_secs
-                        ));
+            PlenumEvent::Transfer(event) => match event {
+                TransferEvent::Listening { port, pin, public_key } => {
+                    self.println(format!("Local listener active on port {port}"));
+                    if let Some(pin) = pin {
+                        self.println(format!("Pairing PIN: {pin}"));
+                    }
+                    if let Some(pk) = public_key {
+                        self.println(format!("Identity Public Key: {pk}"));
                     }
                 }
-                DiscoveryEvent::BroadcastStarted { token, port } => {
-                    self.println(format!(
-                        "Broadcasting on local network with pairing token {} on port {}",
-                        token, port
-                    ));
+                TransferEvent::VerificationCode(code) => {
+                    self.println(format!("Security Verification Code: {code}"));
                 }
-                DiscoveryEvent::PeerFound(summary) => {
-                    self.println(format!(
-                        "Found peer '{}' at {} (token: {})",
-                        summary.hostname, summary.address, summary.token
-                    ));
-                }
-                DiscoveryEvent::PeerNotFound => {
-                    self.println("No peers found on the local network.");
-                }
-            },
-            PlenumEvent::Transfer(event) => match event {
                 TransferEvent::StateChanged { state, peer, .. } => match state {
                     ConnectionState::Discovering => self.println("Discovering peer..."),
                     ConnectionState::Listening => {
@@ -251,6 +231,16 @@ impl plenum::app::EventSink for CliEventSink {
                     }
                     self.println(format!("Transfer refused by peer ({reason})."));
                 }
+                TransferEvent::Packaging {
+                    current_item,
+                    total_items,
+                    current_name,
+                    bytes_packaged,
+                } => {
+                    self.println(format!(
+                        "Archiving ({current_item}/{total_items}): {current_name} ({bytes_packaged} bytes)"
+                    ));
+                }
                 TransferEvent::Failed { message, .. } => {
                     if let Some(pb) = self.progress.take() {
                         pb.finish_and_clear();
@@ -290,6 +280,7 @@ impl plenum::app::EventSink for CliEventSink {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    plenum::rtc::resolve::spawn_remote_config_fetch();
     let cli = Cli::parse();
     let mut core = PlenumCore::new();
     let mut sink = CliEventSink::new();
@@ -299,15 +290,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Commands::Send {
             file_path,
-            address,
-            token,
+            target,
+            relay_server,
+            relay_fallback_ips,
         } => {
-            core.send_file(
-                SendRequest {
-                    file_path,
-                    address,
-                    discovery_token: token,
+            if let Some(ips) = relay_fallback_ips {
+                plenum::rtc::resolve::set_custom_fallback_ips(ips);
+            }
+            let payload = if let Ok(parsed) = UnifiedSharePayload::parse_uri(&target) {
+                parsed
+            } else if target.contains(':') {
+                let parts: Vec<&str> = target.split(':').collect();
+                let ip = parts[0].to_string();
+                let port = parts.get(1).and_then(|p| p.parse::<u16>().ok()).unwrap_or(0);
+                UnifiedSharePayload {
+                    version: 1,
+                    room_code: generate_room_code(),
+                    lan_ips: vec![ip],
+                    port,
+                    pin: None,
+                    peer_id: None,
                     device_name: None,
+                    public_key: None,
+                }
+            } else {
+                UnifiedSharePayload::new(&target)
+            };
+
+            let my_peer_id = generate_peer_id();
+            core.send_file_unified(
+                SendUnifiedRequest {
+                    file_path: file_path.clone(),
+                    file_paths: vec![file_path],
+                    payload,
+                    relay_server_url: relay_server,
+                    my_peer_id,
+                    ice_servers: vec![plenum::signaling::IceServer {
+                        urls: vec!["stun:stun.l.google.com:19302".into()],
+                        username: None,
+                        credential: None,
+                    }],
+                    connect_timeout_secs: 30,
+                    device_name: Some("Plenum CLI".into()),
                     permissions,
                     options,
                 },
@@ -317,31 +341,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Receive {
             port,
             output_dir,
-            no_discover,
+            require_pin,
+            relay_server,
+            relay_fallback_ips,
         } => {
-            core.receive_file(
-                ReceiveRequest {
-                    port,
+            if let Some(ips) = relay_fallback_ips {
+                plenum::rtc::resolve::set_custom_fallback_ips(ips);
+            }
+            let room_code = generate_room_code();
+            let my_peer_id = generate_peer_id();
+            let local_ips = get_local_ip_addresses();
+
+            println!("Room code: {room_code}");
+            let connect_payload = UnifiedSharePayload {
+                version: 1,
+                room_code: room_code.clone(),
+                lan_ips: local_ips,
+                port,
+                pin: None,
+                peer_id: Some(my_peer_id.clone()),
+                device_name: Some("Plenum CLI".into()),
+                public_key: None,
+            };
+            println!("Connection URI: {}", connect_payload.to_uri());
+
+            core.receive_file_unified(
+                ReceiveUnifiedRequest {
                     output_dir,
-                    announce_on_lan: !no_discover,
-                    device_name: None,
-                    require_pin: false,
+                    relay_server_url: relay_server,
+                    session_id: room_code,
+                    my_peer_id,
+                    ice_servers: vec![plenum::signaling::IceServer {
+                        urls: vec!["stun:stun.l.google.com:19302".into()],
+                        username: None,
+                        credential: None,
+                    }],
+                    connect_timeout_secs: 30,
+                    port,
+                    require_pin,
                     auto_accept: true,
+                    device_name: Some("Plenum CLI".into()),
                     permissions,
                     options,
                 },
                 &mut sink,
             )?;
-        }
-        Commands::Discover { token, timeout } => {
-            let _ = core.discover_peer(
-                DiscoverRequest {
-                    token,
-                    timeout_secs: timeout,
-                    permissions,
-                },
-                &mut sink,
-            );
         }
         Commands::Benchmark {
             size_mb,

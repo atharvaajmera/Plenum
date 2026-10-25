@@ -1,5 +1,5 @@
-use plenum::protocol::{Packet, PacketType, encode_packet, parse_packet};
-use plenum::stream::{StreamError, chunk_bytes, reassemble_packets};
+use plenum::protocol::{PacketType, encode_packet, parse_packet};
+use plenum::stream::{StreamError, chunk_bytes};
 
 #[test]
 fn chunks_small_buffer_with_sequence_numbers() {
@@ -31,7 +31,10 @@ fn reassembles_large_buffer() {
     let original: Vec<u8> = (0..10_000).map(|value| (value % 251) as u8).collect();
     let packets = chunk_bytes(&original, 1024).expect("chunking should succeed");
 
-    let restored = reassemble_packets(packets).expect("reassembly should succeed");
+    let mut restored = Vec::new();
+    for packet in packets {
+        restored.extend_from_slice(&packet.payload);
+    }
 
     assert_eq!(restored, original);
 }
@@ -43,51 +46,6 @@ fn handles_final_partial_chunk() {
     let payload_lengths: Vec<usize> = packets.iter().map(|packet| packet.payload.len()).collect();
 
     assert_eq!(payload_lengths, vec![4, 4, 2]);
-}
-
-#[test]
-fn reassembles_out_of_order_packets() {
-    let original = b"out of order packets should still reassemble";
-    let mut packets = chunk_bytes(original, 6).expect("chunking should succeed");
-    packets.reverse();
-
-    let restored = reassemble_packets(packets).expect("reassembly should succeed");
-
-    assert_eq!(restored, original);
-}
-
-#[test]
-fn detects_duplicate_sequence_numbers() {
-    let mut packets = chunk_bytes(b"duplicate packet", 5).expect("chunking should succeed");
-    packets.push(packets[1].clone());
-
-    let err = reassemble_packets(packets).expect_err("duplicate packet should fail");
-
-    assert_eq!(err, StreamError::DuplicateSequence { sequence_no: 1 });
-}
-
-#[test]
-fn detects_missing_sequence_numbers() {
-    let mut packets = chunk_bytes(b"missing packet", 4).expect("chunking should succeed");
-    packets.remove(1);
-
-    let err = reassemble_packets(packets).expect_err("missing packet should fail");
-
-    assert_eq!(err, StreamError::MissingSequence { sequence_no: 1 });
-}
-
-#[test]
-fn rejects_non_data_packets() {
-    let packets = vec![Packet::new(PacketType::Ack, 0, Vec::new())];
-
-    let err = reassemble_packets(packets).expect_err("non-data packet should fail");
-
-    assert_eq!(
-        err,
-        StreamError::UnexpectedPacketType {
-            actual: PacketType::Ack,
-        }
-    );
 }
 
 #[test]
@@ -103,7 +61,10 @@ fn chunks_encode_parse_and_reassemble_original_bytes() {
         })
         .collect();
 
-    let restored = reassemble_packets(parsed_packets).expect("reassembly should succeed");
+    let mut restored = Vec::new();
+    for packet in parsed_packets {
+        restored.extend_from_slice(&packet.payload);
+    }
 
     assert_eq!(restored, original);
 }

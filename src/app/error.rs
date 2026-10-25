@@ -3,7 +3,6 @@
 use std::fmt;
 
 use crate::app::types::PermissionKind;
-use crate::discovery::DiscoveryError;
 use crate::flow::FlowError;
 use crate::protocol::ProtocolError;
 use crate::rtc::RtcError;
@@ -27,7 +26,6 @@ pub enum AppError {
     /// The transfer made no observable progress for longer than the watchdog
     /// allows (e.g. the peer went half-open and packets stopped flowing).
     Stalled(String),
-    Discovery(DiscoveryError),
     Flow(FlowError),
     Protocol(ProtocolError),
     Rtc(RtcError),
@@ -49,7 +47,6 @@ impl fmt::Display for AppError {
             Self::Cancelled => write!(f, "transfer cancelled"),
             Self::Rejected(message) => write!(f, "{message}"),
             Self::Stalled(message) => write!(f, "transfer stalled: {message}"),
-            Self::Discovery(error) => write!(f, "discovery error: {error}"),
             Self::Flow(error) => write!(f, "flow error: {error}"),
             Self::Protocol(error) => write!(f, "protocol error: {error}"),
             Self::Rtc(error) => write!(f, "rtc error: {error}"),
@@ -65,7 +62,6 @@ impl fmt::Display for AppError {
 impl std::error::Error for AppError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Discovery(error) => Some(error),
             Self::Flow(error) => Some(error),
             Self::Protocol(error) => Some(error),
             Self::Rtc(error) => Some(error),
@@ -76,12 +72,6 @@ impl std::error::Error for AppError {
             Self::Io(error) => Some(error),
             _ => None,
         }
-    }
-}
-
-impl From<DiscoveryError> for AppError {
-    fn from(error: DiscoveryError) -> Self {
-        Self::Discovery(error)
     }
 }
 

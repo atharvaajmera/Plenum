@@ -2,14 +2,12 @@
 
 pub mod error;
 pub mod memory;
-pub mod multipath;
 pub mod secure;
 pub mod tcp;
 
 pub use error::TransportError;
 pub use memory::{MemoryTransport, MemoryTransportConfig};
-pub use multipath::MultipathTransport;
-pub use secure::SecureTransport;
+pub use secure::{compute_sas, SecureTransport};
 pub use tcp::TcpTransport;
 
 pub type TransportResult<T> = Result<T, TransportError>;
@@ -31,6 +29,14 @@ pub trait Transport {
 
     fn is_relayed(&self) -> Option<bool> {
         None
+    }
+
+    fn sas_code(&self) -> Option<String> {
+        None
+    }
+
+    fn is_pinned(&self) -> bool {
+        false
     }
 }
 
@@ -57,6 +63,14 @@ impl<T: ?Sized + Transport> Transport for Box<T> {
 
     fn is_relayed(&self) -> Option<bool> {
         (**self).is_relayed()
+    }
+
+    fn sas_code(&self) -> Option<String> {
+        (**self).sas_code()
+    }
+
+    fn is_pinned(&self) -> bool {
+        (**self).is_pinned()
     }
 }
 
